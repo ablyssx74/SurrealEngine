@@ -13,6 +13,7 @@
 #include <queue>
 #include <thread>
 #include <chrono>
+#include <cstdio>
 #include <AL/al.h>
 #include <AL/alc.h>
 #include <AL/alext.h>
@@ -208,6 +209,8 @@ public:
 		if (alDevice == nullptr)
 			Exception::Throw("Failed to initialize OpenAL device");
 
+		fprintf(stderr, "[OpenAL] Device: %s\n", alcGetString(alDevice, ALC_DEVICE_SPECIFIER));
+
 		const ALCint ctxAttribs[] =
 		{
 			ALC_FREQUENCY, inFrequency,
@@ -221,6 +224,10 @@ public:
 
 		if (alcMakeContextCurrent(alContext) == ALC_FALSE)
 			Exception::Throw("Failed to make OpenAL context current");
+
+		fprintf(stderr, "[OpenAL] Vendor: %s\n", alGetString(AL_VENDOR));
+		fprintf(stderr, "[OpenAL] Renderer: %s\n", alGetString(AL_RENDERER));
+		fprintf(stderr, "[OpenAL] Version: %s\n", alGetString(AL_VERSION));
 
 		// init listener state
 		ALfloat listenerOri[] = { 0.0f, -1.0f, 0.0f, 0.0f, 0.0f, -1.0f };
