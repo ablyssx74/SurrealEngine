@@ -92,6 +92,17 @@ std::string GLFileResource::readAllText(const std::string& filename)
 					return;
 				}
 
+				// Debug escape hatch (SE_DEBUG_SHOW_BASETEX): show exactly what the base
+				// "tex" sampler returns for this surface, with no darkClamp/color-multiply/
+				// lightmap/anything else applied - narrows down whether the base texture
+				// sample itself is black, or something multiplies a valid sample down to black.
+				if ((flags & 256u) != 0u)
+				{
+					outColor = textureTex(texCoord);
+					outHitIndex = hitIndex;
+					return;
+				}
+
 				float actorXBlending = (flags & 32u) != 0u ? 1.5 : 1.0;
 				float oneXBlending = (flags & 64u) != 0u ? 1.0 : 2.0;
 
