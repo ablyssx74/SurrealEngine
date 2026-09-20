@@ -114,6 +114,14 @@ public:
 	bool CursorLocked = false;
 	bool isFullscreen = false;
 
+	// SDL3 reports relative mouse motion as floats (SDL2 used whole-pixel ints).
+	// OnWindowRawMouseMove() only takes ints, so keep the fractional remainder
+	// between events instead of truncating it away every time - otherwise any
+	// sub-pixel-per-event motion (common with SDL3's relative mode) is lost,
+	// making mouselook feel extremely sluggish.
+	float RawMouseMoveRemainderX = 0.0f;
+	float RawMouseMoveRemainderY = 0.0f;
+
 	static bool ExitRunLoop;
 	static Uint32 PaintEventNumber;
 	static std::unordered_map<unsigned int, SDL3DisplayWindow*> WindowList;
