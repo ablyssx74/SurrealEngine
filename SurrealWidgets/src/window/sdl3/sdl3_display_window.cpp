@@ -226,6 +226,8 @@ void SDL3DisplayWindow::LockCursor()
 	{
 		SDL_SetWindowRelativeMouseMode(Handle.window, true);
 		CursorLocked = true;
+		RawMouseMoveRemainderX = 0.0f;
+		RawMouseMoveRemainderY = 0.0f;
 	}
 }
 
@@ -647,7 +649,15 @@ void SDL3DisplayWindow::OnMouseMotion(const SDL_MouseMotionEvent& event)
 {
 	if (CursorLocked)
 	{
-		WindowHost->OnWindowRawMouseMove(event.xrel, event.yrel);
+		float x = event.xrel + RawMouseMoveRemainderX;
+		float y = event.yrel + RawMouseMoveRemainderY;
+		int dx = (int)x;
+		int dy = (int)y;
+		RawMouseMoveRemainderX = x - dx;
+		RawMouseMoveRemainderY = y - dy;
+
+		if (dx != 0 || dy != 0)
+			WindowHost->OnWindowRawMouseMove(dx, dy);
 	}
 	else
 	{
