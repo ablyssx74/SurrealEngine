@@ -23,6 +23,7 @@
 #include "sdl2.h"
 
 #include <cassert>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -190,7 +191,12 @@ BackendFactory &SDL2BackendFactory::getFactory()
 }
 
 bool SDL2BackendFactory::init()
-{ return (SDL_InitSubSystem(SDL_INIT_AUDIO) == 0); }
+{
+    bool ok = (SDL_InitSubSystem(SDL_INIT_AUDIO) == 0);
+    if (!ok)
+        fprintf(stderr, "[OpenAL SDL2] SDL_InitSubSystem(SDL_INIT_AUDIO) failed: %s\n", SDL_GetError());
+    return ok;
+}
 
 bool SDL2BackendFactory::querySupport(BackendType type)
 { return type == BackendType::Playback; }

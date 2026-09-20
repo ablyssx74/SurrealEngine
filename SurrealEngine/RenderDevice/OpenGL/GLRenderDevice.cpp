@@ -1329,6 +1329,18 @@ void GLRenderDevice::DrawComplexSurface(SceneNode* Frame, SurfaceInfo& Surface, 
 	ComplexSurfaceInfo info;
 	info.facet = &Facet;
 	info.tex = Textures->GetTexture(Surface.Texture, !!(PolyFlags & PF_Masked));
+
+	// Diagnostic escape hatch: set SE_DEBUG_FORCE_NULLTEX_WORLD=1 to use the engine's own
+	// known-good 1x1 white texture (used everywhere else as the "no texture" fallback) as the
+	// base texture for world surfaces, through the completely normal render path (darkClamp,
+	// color multiply, lightmap, everything - unlike SE_DEBUG_MAGENTA_WORLD/SHOW_BASETEX, which
+	// bypass all of that). If world surfaces render white/lit instead of black, the texture
+	// binding/sampling pipeline is fine and the real world textures' own uploaded data is bad;
+	// if it's still black even with a texture that's known to work everywhere else, the bug is
+	// in the binding/pipeline for this draw call, not any specific texture's content.
+	static const bool debugForceNulltexWorld = std::getenv("SE_DEBUG_FORCE_NULLTEX_WORLD") != nullptr;
+	if (debugForceNulltexWorld)
+		info.tex = nulltex;
 	info.lightmap = Textures->GetTexture(Surface.LightMap, false);
 	info.macrotex = Textures->GetTexture(Surface.MacroTexture, false);
 	info.detailtex = Textures->GetTexture(Surface.DetailTexture, false);
