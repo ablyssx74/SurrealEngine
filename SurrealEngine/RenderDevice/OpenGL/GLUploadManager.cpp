@@ -3,6 +3,7 @@
 #include "GLUploadManager.h"
 #include "GLRenderDevice.h"
 #include "GLCachedTexture.h"
+#include <cstdlib>
 
 GLUploadManager::GLUploadManager(GLRenderDevice* renderer) : renderer(renderer)
 {
@@ -22,6 +23,15 @@ void GLUploadManager::UploadTexture(GLCachedTexture* tex, const TextureInfo& Inf
 	int width = Info.USize;
 	int height = Info.VSize;
 	int mipcount = Info.NumMips;
+
+	// Diagnostic escape hatch: set SE_DEBUG_NO_MIPMAPS=1 to force every texture to a single
+	// mip level, no matter how many levels its source data has. All our sampler objects use
+	// mipmap-requiring min filters (*_MIPMAP_*), so an incomplete mip chain on some texture
+	// (only some levels actually written, e.g. because Mips[level].Data is empty) would make
+	// that texture sample as black on a strict/core-profile driver. This rules that out.
+	static const bool debugNoMipmaps = std::getenv("SE_DEBUG_NO_MIPMAPS") != nullptr;
+	if (debugNoMipmaps)
+		mipcount = 1;
 
 	GLTextureUploader* uploader = GLTextureUploader::GetUploader(Info.Format);
 
@@ -121,7 +131,10 @@ void GLUploadManager::UploadTextureRect(GLCachedTexture* tex, const TextureInfo&
 
 void GLUploadManager::UploadData(GLTexture2D* image, const TextureInfo& Info, bool masked, GLTextureUploader* uploader, int dummyMipmapCount, int minSize)
 {
-	for (int level = 0; level < Info.NumMips; level++)
+	static const bool debugNoMipmaps = std::getenv("SE_DEBUG_NO_MIPMAPS") != nullptr;
+	int numMips = debugNoMipmaps ? 1 : Info.NumMips;
+
+	for (int level = 0; level < numMips; level++)
 	{
 		UnrealMipmap* Mip = &Info.Mips[level];
 		if (!Mip->Data.empty())
