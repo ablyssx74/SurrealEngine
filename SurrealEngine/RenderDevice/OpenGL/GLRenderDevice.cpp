@@ -1366,8 +1366,16 @@ void GLRenderDevice::DrawComplexSurfaceFaces(const ComplexSurfaceInfo& info)
 	// sampled/computed for the pixel color.
 	static const bool debugMagenta = std::getenv("SE_DEBUG_MAGENTA_WORLD") != nullptr;
 
+	// Diagnostic escape hatch: set SE_DEBUG_SHOW_BASETEX=1 to show exactly what the base
+	// "tex" sampler returns per-pixel, bypassing darkClamp/color-multiply/lightmap/everything
+	// else. Confirmed the world is being rasterized (SE_DEBUG_MAGENTA_WORLD) and that
+	// disabling just the lightmap (SE_DISABLE_LIGHTMAP) doesn't help - this narrows down
+	// whether the base texture sample itself is the black culprit.
+	static const bool debugShowBaseTex = std::getenv("SE_DEBUG_SHOW_BASETEX") != nullptr;
+
 	uint32_t flags = 0;
 	if (debugMagenta) flags |= 128;
+	if (debugShowBaseTex) flags |= 256;
 	if (info.lightmap != nulltex && !disableLightmap) flags |= 1;
 	if (info.macrotex != nulltex) flags |= 2;
 	if (info.detailtex != nulltex && info.fogmap == nulltex) flags |= 4;
