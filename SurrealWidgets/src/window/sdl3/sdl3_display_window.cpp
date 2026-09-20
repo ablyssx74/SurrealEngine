@@ -222,14 +222,20 @@ void SDL3DisplayWindow::UnlockKeyboard()
 
 void SDL3DisplayWindow::LockCursor()
 {
-	SDL_CaptureMouse(true);
-	CursorLocked = true;
+	if (!CursorLocked)
+	{
+		SDL_SetWindowRelativeMouseMode(Handle.window, true);
+		CursorLocked = true;
+	}
 }
 
 void SDL3DisplayWindow::UnlockCursor()
 {
-	SDL_CaptureMouse(false);
-	CursorLocked = false;
+	if (CursorLocked)
+	{
+		SDL_SetWindowRelativeMouseMode(Handle.window, false);
+		CursorLocked = false;
+	}
 }
 
 void SDL3DisplayWindow::CaptureMouse()

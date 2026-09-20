@@ -45,7 +45,14 @@ public:
 		bool UseVSync = true;
 		AntialiasMode Antialias = AntialiasMode::MSAA4x;
 		LightMode Light = LightMode::Normal;
+#ifdef __HAIKU__
+		// The D3D9 gamma curve is too dark when paired with the OpenGL render
+		// device we default to on Haiku (no Vulkan available); XOpenGL is the
+		// curve meant for it.
+		GammaMode Gamma = GammaMode::XOpenGL;
+#else
 		GammaMode Gamma = GammaMode::D3D9;
+#endif
 		bool GammaCorrectScreenshots = false;
 		bool Hdr = false;
 		int HdrScale = 128;

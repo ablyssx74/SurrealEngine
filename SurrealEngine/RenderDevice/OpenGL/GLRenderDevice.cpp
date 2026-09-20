@@ -9,6 +9,7 @@
 #include "Packages/Engine/Resources/Level/UModel.h"
 #include <surrealwidgets/core/widget.h>
 #include <cmath>
+#include <cstdio>
 
 static Widget* InitGLWidget = nullptr;
 extern "C"
@@ -17,6 +18,15 @@ extern "C"
 	{
 		return reinterpret_cast<void*>(InitGLWidget->GetGLProcAddress((const char*)name));
 	}
+}
+
+static void APIENTRY GLDebugCallback(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar* message, const void* userParam)
+{
+	// Notifications are mostly informational spam (buffer usage hints etc.) - skip those
+	if (severity == GL_DEBUG_SEVERITY_NOTIFICATION)
+		return;
+
+	fprintf(stderr, "[GL] %s\n", message);
 }
 
 GLRenderDevice::GLRenderDevice(Widget* InViewport)
@@ -57,6 +67,18 @@ bool GLRenderDevice::Init(int NewX, int NewY, bool Fullscreen)
 		InitGLWidget = nullptr;
 		if (result == ogl_LOAD_FAILED)
 			throw std::runtime_error("ogl_LoadFunctions failed");
+
+		fprintf(stderr, "[GL] Vendor: %s\n", glGetString(GL_VENDOR));
+		fprintf(stderr, "[GL] Renderer: %s\n", glGetString(GL_RENDERER));
+		fprintf(stderr, "[GL] Version: %s\n", glGetString(GL_VERSION));
+		fprintf(stderr, "[GL] Shading language version: %s\n", glGetString(GL_SHADING_LANGUAGE_VERSION));
+
+		if (UseDebugLayer && glDebugMessageCallback)
+		{
+			glEnable(GL_DEBUG_OUTPUT);
+			glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
+			glDebugMessageCallback(GLDebugCallback, nullptr);
+		}
 
 		CreateScenePass();
 		CreatePresentPass();

@@ -239,7 +239,11 @@ void VideoSettingsPage::OnResetButtonClicked()
 	UseVSync->SetChecked(true);
 	AntialiasModes->SetSelectedItem(0);
 	LightModes->SetSelectedItem(0);
+#ifdef __HAIKU__
+	GammaModes->SetSelectedItem(1); // XOpenGL - matches the OpenGL render device default above
+#else
 	GammaModes->SetSelectedItem(0);
+#endif
 	Hdr->SetChecked(false);
 	HdrScale->SetTextInt(128);
 	Bloom->SetChecked(false);
