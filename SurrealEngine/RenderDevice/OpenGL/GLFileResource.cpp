@@ -82,6 +82,16 @@ std::string GLFileResource::readAllText(const std::string& filename)
 
 			void main()
 			{
+				// Debug escape hatch (SE_DEBUG_MAGENTA_WORLD): paint a flat, unmistakable
+				// color with no texture/lightmap sampling at all, to tell apart "nothing is
+				// being rasterized here" from "something about the sampled colors is wrong".
+				if ((flags & 128u) != 0u)
+				{
+					outColor = vec4(1.0, 0.0, 1.0, 1.0);
+					outHitIndex = hitIndex;
+					return;
+				}
+
 				float actorXBlending = (flags & 32u) != 0u ? 1.5 : 1.0;
 				float oneXBlending = (flags & 64u) != 0u ? 1.0 : 2.0;
 
