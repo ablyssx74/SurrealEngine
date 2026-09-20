@@ -10,6 +10,7 @@
 #include <surrealwidgets/core/widget.h>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 
 static Widget* InitGLWidget = nullptr;
 extern "C"
@@ -1038,6 +1039,15 @@ void GLRenderDevice::Lock(vec4 InFlashScale, vec4 InFlashFog, vec4 ScreenClear, 
 
 	IsLocked = true;
 
+	// Diagnostic: periodically dump what's actually being submitted to the renderer,
+	// to tell apart "surfaces aren't being drawn at all" from "they're drawn but wrong".
+	static int lockCount = 0;
+	if ((lockCount++ % 300) == 0)
+	{
+		fprintf(stderr, "[GL] ClearColor: (%.2f, %.2f, %.2f, %.2f)  Stats since startup: ComplexSurfaces=%d GouraudPolygons=%d Tiles=%d DrawCalls=%d\n",
+			color[0], color[1], color[2], color[3], Stats.ComplexSurfaces, Stats.GouraudPolygons, Stats.Tiles, Stats.DrawCalls);
+	}
+
 	ThrowIfGLError("Lock failed");
 }
 
@@ -1344,8 +1354,13 @@ void GLRenderDevice::DrawComplexSurfaceFaces(const ComplexSurfaceInfo& info)
 	if (info.facet->VertexCount < 3)
 		return;
 
+	// Diagnostic escape hatch: set SE_DISABLE_LIGHTMAP=1 to skip the lightmap multiply
+	// on world geometry entirely, to help tell apart "the lightmap texture/sample is
+	// bad on this driver" from "something else about this draw call is wrong".
+	static const bool disableLightmap = std::getenv("SE_DISABLE_LIGHTMAP") != nullptr;
+
 	uint32_t flags = 0;
-	if (info.lightmap != nulltex) flags |= 1;
+	if (info.lightmap != nulltex && !disableLightmap) flags |= 1;
 	if (info.macrotex != nulltex) flags |= 2;
 	if (info.detailtex != nulltex && info.fogmap == nulltex) flags |= 4;
 	if (info.fogmap != nulltex) flags |= 8;
