@@ -99,6 +99,21 @@ include(GNUInstallDirs)
 
 find_package(PkgConfig)
 find_package(SDL2 QUIET)
+if(NOT SDL2_FOUND AND PkgConfig_FOUND)
+    # SDL2 doesn't ship a CMake config on every platform (e.g. Haiku's sdl2_devel only
+    # provides a pkg-config file), in which case find_package() above can't find it even
+    # though it's genuinely installed. Fall back to pkg-config and synthesize the
+    # SDL2::SDL2 imported target ourselves, since everything below unconditionally
+    # expects that target to exist whenever SDL2_FOUND is true.
+    pkg_check_modules(SDL2 QUIET sdl2)
+    if(SDL2_FOUND AND NOT TARGET SDL2::SDL2)
+        add_library(SDL2::SDL2 INTERFACE IMPORTED)
+        set_target_properties(SDL2::SDL2 PROPERTIES
+            INTERFACE_INCLUDE_DIRECTORIES "${SDL2_INCLUDE_DIRS}"
+            INTERFACE_LINK_LIBRARIES "${SDL2_LIBRARIES}"
+            INTERFACE_LINK_DIRECTORIES "${SDL2_LIBRARY_DIRS}")
+    endif()
+endif()
 
 
 option(ALSOFT_DLOPEN  "Check for the dlopen API for loading optional libs"  ON)

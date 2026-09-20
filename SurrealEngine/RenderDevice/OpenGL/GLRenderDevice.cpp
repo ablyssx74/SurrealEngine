@@ -1042,7 +1042,7 @@ void GLRenderDevice::Lock(vec4 InFlashScale, vec4 InFlashFog, vec4 ScreenClear, 
 	// Diagnostic: periodically dump what's actually being submitted to the renderer,
 	// to tell apart "surfaces aren't being drawn at all" from "they're drawn but wrong".
 	static int lockCount = 0;
-	if ((lockCount++ % 300) == 0)
+	if ((lockCount++ % 60) == 0)
 	{
 		fprintf(stderr, "[GL] ClearColor: (%.2f, %.2f, %.2f, %.2f)  Stats since startup: ComplexSurfaces=%d GouraudPolygons=%d Tiles=%d DrawCalls=%d\n",
 			color[0], color[1], color[2], color[3], Stats.ComplexSurfaces, Stats.GouraudPolygons, Stats.Tiles, Stats.DrawCalls);
@@ -1359,7 +1359,15 @@ void GLRenderDevice::DrawComplexSurfaceFaces(const ComplexSurfaceInfo& info)
 	// bad on this driver" from "something else about this draw call is wrong".
 	static const bool disableLightmap = std::getenv("SE_DISABLE_LIGHTMAP") != nullptr;
 
+	// Diagnostic escape hatch: set SE_DEBUG_MAGENTA_WORLD=1 to paint every world surface
+	// flat magenta instead of sampling any texture/lightmap. If the world stays black with
+	// this set, the surfaces aren't even being rasterized (a geometry/state problem); if it
+	// turns magenta, rasterization is fine and the problem is specifically in what gets
+	// sampled/computed for the pixel color.
+	static const bool debugMagenta = std::getenv("SE_DEBUG_MAGENTA_WORLD") != nullptr;
+
 	uint32_t flags = 0;
+	if (debugMagenta) flags |= 128;
 	if (info.lightmap != nulltex && !disableLightmap) flags |= 1;
 	if (info.macrotex != nulltex) flags |= 2;
 	if (info.detailtex != nulltex && info.fogmap == nulltex) flags |= 4;
