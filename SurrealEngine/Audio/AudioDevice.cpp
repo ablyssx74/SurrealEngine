@@ -209,7 +209,11 @@ public:
 		if (alDevice == nullptr)
 			Exception::Throw("Failed to initialize OpenAL device");
 
-		fprintf(stderr, "[OpenAL] Device: %s\n", alcGetString(alDevice, ALC_DEVICE_SPECIFIER));
+		// Note: ALC_DEVICE_SPECIFIER always returns the fixed string "OpenAL Soft" regardless
+		// of backend/device - it's not useful for telling which backend actually got picked.
+		// ALC_ALL_DEVICES_SPECIFIER on an opened device returns the real backend-assigned name
+		// (e.g. "No Output" for the null backend, or the actual device name for a working one).
+		fprintf(stderr, "[OpenAL] Device: %s\n", alcGetString(alDevice, ALC_ALL_DEVICES_SPECIFIER));
 
 		const ALCint ctxAttribs[] =
 		{
