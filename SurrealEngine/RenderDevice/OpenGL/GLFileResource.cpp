@@ -57,7 +57,12 @@ std::string GLFileResource::readAllText(const std::string& filename)
 			layout(binding = 3) uniform sampler2D detail;
 
 			layout(location = 0) flat in uint flags;
-			layout(location = 1) centroid in vec2 texCoord;
+			// Was "centroid in" here while Scene.vert's matching output is plain "out" - that
+			// stage interface mismatch is undefined behavior per the GLSL/SPIR-V spec. Desktop
+			// GL drivers tend to tolerate it; dropping the stray qualifier is a candidate fix
+			// for world surfaces sampling as black once translated through Zink's stricter
+			// SPIR-V pipeline.
+			layout(location = 1) in vec2 texCoord;
 			layout(location = 2) in vec2 texCoord2;
 			layout(location = 3) in vec2 texCoord3;
 			layout(location = 4) in vec2 texCoord4;
