@@ -1602,6 +1602,9 @@ void Engine::TickWindow()
 
 void Engine::OnWindowPaint()
 {
+	// Fires (via SDL_EVENT_WINDOW_SHOWN/EXPOSED) as the window finishes appearing on
+	// screen, including the very first time at startup. See ReassertCursorLock().
+	ReassertCursorLock();
 }
 
 void Engine::OnWindowMouseMove(const Point& pos)
@@ -1715,6 +1718,10 @@ void Engine::OnWindowKeyUp(EInputKey key)
 
 void Engine::OnWindowGeometryChanged()
 {
+	// Fires (via SDL_EVENT_WINDOW_MOVED/PIXEL_SIZE_CHANGED/RESIZED) as the window settles
+	// into its final fullscreen bounds at startup, including before any real OS focus
+	// round-trip ever happens. See ReassertCursorLock().
+	ReassertCursorLock();
 }
 
 void Engine::OnWindowClose()
@@ -1726,22 +1733,31 @@ void Engine::OnWindowActivated()
 {
 	//SetPause(false);
 
-	// Some platforms (e.g. SDL3 on Haiku) don't fully engage relative mouse mode on a window
-	// that wasn't actually focused yet at the moment LockCursor() first ran, leading to
-	// sluggish/laggy mouselook that only clears up once the window goes through a genuine
-	// focus round-trip. LockCursor() alone is a no-op once already "locked" from our point of
-	// view, so force a real unlock+relock cycle here to make that focus round-trip happen
-	// automatically instead of requiring the player to alt-tab away and back manually.
-	if (window && engine->LaunchInfo.ue1Version > 219 && !(viewport->bShowWindowsMouse() && viewport->bWindowsMouseAvailable()))
-	{
-		window->UnlockCursor();
-		window->LockCursor();
-	}
+	// A real focus round-trip (e.g. alt-tab away and back) is known to fix sluggish/laggy
+	// mouselook on some platforms. See ReassertCursorLock().
+	ReassertCursorLock();
 }
 
 void Engine::OnWindowDeactivated()
 {
 	//SetPause(true);
+}
+
+void Engine::ReassertCursorLock()
+{
+	// Some platforms (e.g. SDL3 on Haiku) don't fully engage relative mouse mode on a window
+	// that wasn't actually focused (or wasn't done resizing into its final fullscreen bounds)
+	// yet at the moment LockCursor() first ran, leading to sluggish/laggy mouselook that only
+	// clears up once the window goes through a genuine focus round-trip. LockCursor() alone is
+	// a no-op once already "locked" from our point of view, so force a real unlock+relock cycle
+	// here instead. Called from window paint/geometry/activation callbacks so it happens
+	// automatically during the normal startup sequence, not only if the player manually
+	// alt-tabs away and back.
+	if (window && engine->LaunchInfo.ue1Version > 219 && !(viewport->bShowWindowsMouse() && viewport->bWindowsMouseAvailable()))
+	{
+		window->UnlockCursor();
+		window->LockCursor();
+	}
 }
 
 void Engine::OnWindowDpiScaleChanged()

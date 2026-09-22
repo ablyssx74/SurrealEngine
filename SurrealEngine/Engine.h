@@ -224,6 +224,8 @@ public:
 	bool getDXWindowDebugMode() const { return m_DrawDebugDXWindowHierarchy; }
 
 private:
+	void ReassertCursorLock();
+
 	std::map<std::string, std::string> CreateTravelInfo(bool transferItems);
 
 	void LogGamePackageSHA1Sums() const;
