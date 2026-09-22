@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
 
 static Widget* InitGLWidget = nullptr;
 extern "C"
@@ -1344,6 +1345,43 @@ void GLRenderDevice::DrawComplexSurface(SceneNode* Frame, SurfaceInfo& Surface, 
 	info.facet = &Facet;
 	info.tex = Textures->GetTexture(Surface.Texture, !!(PolyFlags & PF_Masked));
 
+	// Diagnostic escape hatch: set SE_DEBUG_READBACK_WORLDTEX=1 to read a real world surface's
+	// base texture straight back from the GPU (via glGetTexImage) right after it's bound here,
+	// and print a few sample texels. This tells apart "the GPU-resident copy is already black"
+	// (an upload-side driver bug) from "the copy is fine but sampling it at draw time returns
+	// black" (a binding/sampler driver bug). Printed once, for the first real (non-nulltex)
+	// world texture encountered.
+	static const bool debugReadbackWorldTex = std::getenv("SE_DEBUG_READBACK_WORLDTEX") != nullptr;
+	static bool debugReadbackWorldTexDone = false;
+	if (debugReadbackWorldTex && !debugReadbackWorldTexDone && info.tex != nulltex && info.tex->Texture)
+	{
+		debugReadbackWorldTexDone = true;
+		GLint w = 0, h = 0;
+		glBindTexture(GL_TEXTURE_2D, info.tex->Texture->Handle);
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h);
+		if (w > 0 && h > 0)
+		{
+			std::vector<uint8_t> pixels(static_cast<size_t>(w) * h * 4);
+			glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+			GLenum err = glGetError();
+			size_t center = ((pixels.size() / 2) / 4) * 4;
+			int nonblack = 0;
+			for (size_t i = 0; i < pixels.size(); i += 4)
+			{
+				if (pixels[i] || pixels[i + 1] || pixels[i + 2])
+					nonblack++;
+			}
+			fprintf(stderr, "[Readback] World base tex handle=%u %dx%d glGetTexImage err=0x%04x\n",
+				info.tex->Texture->Handle, w, h, err);
+			fprintf(stderr, "[Readback] %d/%d texels non-black. First=(%u,%u,%u,%u) Center=(%u,%u,%u,%u)\n",
+				nonblack, w * h,
+				pixels[0], pixels[1], pixels[2], pixels[3],
+				pixels[center], pixels[center + 1], pixels[center + 2], pixels[center + 3]);
+		}
+		glBindTexture(GL_TEXTURE_2D, 0);
+	}
+
 	// Diagnostic escape hatch: set SE_DEBUG_FORCE_NULLTEX_WORLD=1 to use the engine's own
 	// known-good 1x1 white texture (used everywhere else as the "no texture" fallback) as the
 	// base texture for world surfaces, through the completely normal render path (darkClamp,
@@ -1484,6 +1522,42 @@ void GLRenderDevice::DrawGouraudPolygon(SceneNode* Frame, TextureInfo& Info, con
 	PolyFlags = ApplyPrecedenceRules(PolyFlags);
 
 	GLCachedTexture* tex = Textures->GetTexture(&Info, !!(PolyFlags & PF_Masked));
+
+	// Diagnostic escape hatch: set SE_DEBUG_READBACK_MESHTEX=1 for the same GPU-readback check
+	// as SE_DEBUG_READBACK_WORLDTEX, but for the first real Gouraud/mesh texture instead of a
+	// world surface. Meshes render fine while world surfaces render black, so comparing these
+	// two readbacks tells us whether the GPU-resident copy actually differs between the two, or
+	// whether both are fine and the bug is specific to how world surfaces get drawn.
+	static const bool debugReadbackMeshTex = std::getenv("SE_DEBUG_READBACK_MESHTEX") != nullptr;
+	static bool debugReadbackMeshTexDone = false;
+	if (debugReadbackMeshTex && !debugReadbackMeshTexDone && tex != nulltex && tex->Texture)
+	{
+		debugReadbackMeshTexDone = true;
+		GLint w = 0, h = 0;
+		glBindTexture(GL_TEXTURE_2D, tex->Texture->Handle);
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h);
+		if (w > 0 && h > 0)
+		{
+			std::vector<uint8_t> pixels(static_cast<size_t>(w) * h * 4);
+			glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+			GLenum err = glGetError();
+			size_t center = ((pixels.size() / 2) / 4) * 4;
+			int nonblack = 0;
+			for (size_t i = 0; i < pixels.size(); i += 4)
+			{
+				if (pixels[i] || pixels[i + 1] || pixels[i + 2])
+					nonblack++;
+			}
+			fprintf(stderr, "[Readback] Mesh tex handle=%u %dx%d glGetTexImage err=0x%04x\n",
+				tex->Texture->Handle, w, h, err);
+			fprintf(stderr, "[Readback] %d/%d texels non-black. First=(%u,%u,%u,%u) Center=(%u,%u,%u,%u)\n",
+				nonblack, w * h,
+				pixels[0], pixels[1], pixels[2], pixels[3],
+				pixels[center], pixels[center + 1], pixels[center + 2], pixels[center + 3]);
+		}
+		glBindTexture(GL_TEXTURE_2D, 0);
+	}
 
 	SetPipeline(PolyFlags);
 	SetDescriptorSet(PolyFlags, tex);

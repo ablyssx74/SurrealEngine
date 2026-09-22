@@ -39,7 +39,7 @@
 
 namespace {
 
-constexpr char defaultDeviceName[] = "Default Device";
+constexpr char defaultDeviceName[] = "Surreal Audio";
 
 struct HaikuBackend final : public BackendBase {
     HaikuBackend(DeviceBase *device) noexcept : BackendBase{device} { }
