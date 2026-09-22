@@ -1388,6 +1388,29 @@ void GLRenderDevice::DrawComplexSurface(SceneNode* Frame, SurfaceInfo& Surface, 
 				(unsigned)(sumR / texelCount), (unsigned)(sumG / texelCount), (unsigned)(sumB / texelCount),
 				pixels[0], pixels[1], pixels[2], pixels[3],
 				pixels[center], pixels[center + 1], pixels[center + 2], pixels[center + 3]);
+
+			// Compute what the CPU-side source data (raw P8 indices run through the palette)
+			// for this exact texture says the average should be, so it can be compared directly
+			// against what actually landed on the GPU above - the decisive test for whether the
+			// upload itself is losing/corrupting data on this driver.
+			if (Surface.Texture && Surface.Texture->Format == TextureFormat::P8 && Surface.Texture->Palette
+				&& Surface.Texture->NumMips > 0 && Surface.Texture->Mips && !Surface.Texture->Mips[0].Data.empty())
+			{
+				const UnrealMipmap& mip = Surface.Texture->Mips[0];
+				const TextureColor* palette = Surface.Texture->Palette;
+				uint64_t cpuSumR = 0, cpuSumG = 0, cpuSumB = 0;
+				size_t texelN = (size_t)mip.Width * mip.Height;
+				for (size_t i = 0; i < texelN && i < mip.Data.size(); i++)
+				{
+					const TextureColor& c = palette[mip.Data[i]];
+					cpuSumR += c.R;
+					cpuSumG += c.G;
+					cpuSumB += c.B;
+				}
+				fprintf(stderr, "[Readback] CPU source (P8+palette) for same texture: %dx%d Avg=(%u,%u,%u)\n",
+					mip.Width, mip.Height,
+					(unsigned)(cpuSumR / texelN), (unsigned)(cpuSumG / texelN), (unsigned)(cpuSumB / texelN));
+			}
 		}
 		glBindTexture(GL_TEXTURE_2D, 0);
 	}
