@@ -76,6 +76,9 @@
 /* Define if we have the SDL2 backend */
 #cmakedefine HAVE_SDL2
 
+/* Define if we have the Haiku Media Kit backend */
+#cmakedefine HAVE_HAIKU
+
 /* Define if we have dlfcn.h */
 #cmakedefine HAVE_DLFCN_H
 

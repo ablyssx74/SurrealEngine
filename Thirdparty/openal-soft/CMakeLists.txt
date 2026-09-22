@@ -877,6 +877,7 @@ set(HAVE_OPENSL     0)
 set(HAVE_OBOE       0)
 set(HAVE_WAVE       0)
 set(HAVE_SDL2       0)
+set(HAVE_HAIKU      0)
 
 if(WIN32 OR HAVE_DLFCN_H)
     set(IS_LINKED "")
@@ -1197,6 +1198,20 @@ if(ALSOFT_BACKEND_SDL2)
 endif()
 if(ALSOFT_REQUIRE_SDL2 AND NOT SDL2_FOUND)
     message(FATAL_ERROR "Failed to enabled required SDL2 backend")
+endif()
+
+# Check for the native Haiku Media Kit backend (BSoundPlayer). Always available on
+# Haiku itself, and irrelevant everywhere else.
+option(ALSOFT_BACKEND_HAIKU "Enable Haiku Media Kit backend" ${HAIKU})
+if(ALSOFT_BACKEND_HAIKU)
+    if(HAIKU)
+        set(HAVE_HAIKU 1)
+        set(ALC_OBJS  ${ALC_OBJS} alc/backends/haiku.cpp alc/backends/haiku.h)
+        set(BACKENDS  "${BACKENDS} Haiku,")
+        set(EXTRA_LIBS ${EXTRA_LIBS} be media)
+    else()
+        message(STATUS "Haiku Media Kit backend is only available on Haiku")
+    endif()
 endif()
 
 # Optionally enable the Wave Writer backend

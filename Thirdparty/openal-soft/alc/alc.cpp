@@ -151,6 +151,9 @@
 #ifdef HAVE_SDL2
 #include "backends/sdl2.h"
 #endif
+#ifdef HAVE_HAIKU
+#include "backends/haiku.h"
+#endif
 #ifdef HAVE_WAVE
 #include "backends/wave.h"
 #endif
@@ -205,6 +208,9 @@ struct BackendInfo {
 };
 
 BackendInfo BackendList[] = {
+#ifdef HAVE_HAIKU
+    { "haiku", HaikuBackendFactory::getFactory },
+#endif
 #ifdef HAVE_PIPEWIRE
     { "pipewire", PipeWireBackendFactory::getFactory },
 #endif

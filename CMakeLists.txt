@@ -7,8 +7,10 @@ add_subdirectory(SurrealGPU)
 add_subdirectory(SurrealWidgets)
 
 if(HAIKU)
-	# Haiku has no ALSA/PulseAudio/OSS. Build openal-soft ourselves (like Windows/macOS do)
-	# and make it talk to the audio hardware through SDL2, which has a native Haiku backend.
+	# Haiku has no ALSA/PulseAudio/OSS. Build openal-soft ourselves (like Windows/macOS do).
+	# ALSOFT_BACKEND_HAIKU (talking to the Media Kit directly via BSoundPlayer) defaults on
+	# for Haiku already; keep SDL2 available too as a fallback backend, since its own Haiku
+	# audio driver has been unreliable in practice.
 	set(ALSOFT_BACKEND_SDL2 ON CACHE BOOL "Enable SDL2 backend" FORCE)
 endif()
 
