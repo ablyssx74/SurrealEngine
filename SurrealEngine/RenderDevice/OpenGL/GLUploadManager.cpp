@@ -134,6 +134,19 @@ void GLUploadManager::UploadData(GLTexture2D* image, const TextureInfo& Info, bo
 	static const bool debugNoMipmaps = std::getenv("SE_DEBUG_NO_MIPMAPS") != nullptr;
 	int numMips = debugNoMipmaps ? 1 : Info.NumMips;
 
+	// UploadTexture() allocates storage (glTexImage2D) for every level up to its own mipcount
+	// and sets GL_TEXTURE_MAX_LEVEL to match, on the assumption every one of those levels gets
+	// written below. But some source textures have a shorter *populated* mip chain than
+	// Info.NumMips claims (Mip->Data.empty() for the higher levels), so those levels never get
+	// a glTexSubImage2D/glCompressedTexImage2D call - their storage exists but is left
+	// uninitialized. GL_TEXTURE_MAX_LEVEL still includes them as "valid" though, so an
+	// automatically-computed (derivative-based) LOD that lands on one of those levels samples
+	// whatever the driver's uninitialized image memory happens to contain - on this Zink/NVK
+	// driver, that reads back as solid black. Track the highest level actually written here and
+	// clamp GL_TEXTURE_MAX_LEVEL to it afterward, so sampling can never land on an unwritten
+	// level in the first place.
+	int highestWrittenLevel = -1;
+
 	for (int level = 0; level < numMips; level++)
 	{
 		UnrealMipmap* Mip = &Info.Mips[level];
@@ -159,7 +172,22 @@ void GLUploadManager::UploadData(GLTexture2D* image, const TextureInfo& Info, bo
 				glCompressedTexImage2D(GL_TEXTURE_2D, level + dummyMipmapCount, uploader->GetInternalformat(), mipwidth, mipheight, 0, mipsize, data);
 				ThrowIfGLError("UploadData(compressed) failed");
 			}
+
+			highestWrittenLevel = level + dummyMipmapCount;
 		}
+		else if (highestWrittenLevel >= 0)
+		{
+			// The mip chain has a gap: this level (and everything smaller) never got written,
+			// even though a lower/larger level did. Stop extending the "known good" range here -
+			// completeness requires a contiguous run of levels from the base level up.
+			break;
+		}
+	}
+
+	if (highestWrittenLevel >= 0)
+	{
+		glBindTexture(GL_TEXTURE_2D, image->Handle);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, highestWrittenLevel);
 	}
 }
 
