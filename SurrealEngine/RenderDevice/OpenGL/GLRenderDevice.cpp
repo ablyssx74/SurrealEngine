@@ -924,6 +924,20 @@ void GLRenderDevice::MapVertices(bool nextBuffer)
 		Stats.BuffersUsed++;
 	}
 
+	// A streaming buffer that's been filled right up to its last slot has zero room left.
+	// glMapBufferRange with a length of 0 is invalid (GL_INVALID_OPERATION, returns null),
+	// so treat "no room left" the same as "need a fresh buffer" instead of ever attempting that.
+	if (GLSceneVertexPos >= SceneVertexBufferSize)
+	{
+		GLSceneVertexPos = 0;
+		nextBuffer = true;
+	}
+	if (SceneIndexPos >= SceneIndexBufferSize)
+	{
+		SceneIndexPos = 0;
+		nextBuffer = true;
+	}
+
 	if (!SceneVertices)
 	{
 		glBindBuffer(GL_ARRAY_BUFFER, ScenePass.VertexBuffer->Handle);

@@ -1725,6 +1725,18 @@ void Engine::OnWindowClose()
 void Engine::OnWindowActivated()
 {
 	//SetPause(false);
+
+	// Some platforms (e.g. SDL3 on Haiku) don't fully engage relative mouse mode on a window
+	// that wasn't actually focused yet at the moment LockCursor() first ran, leading to
+	// sluggish/laggy mouselook that only clears up once the window goes through a genuine
+	// focus round-trip. LockCursor() alone is a no-op once already "locked" from our point of
+	// view, so force a real unlock+relock cycle here to make that focus round-trip happen
+	// automatically instead of requiring the player to alt-tab away and back manually.
+	if (window && engine->LaunchInfo.ue1Version > 219 && !(viewport->bShowWindowsMouse() && viewport->bWindowsMouseAvailable()))
+	{
+		window->UnlockCursor();
+		window->LockCursor();
+	}
 }
 
 void Engine::OnWindowDeactivated()

@@ -192,9 +192,20 @@ BackendFactory &SDL2BackendFactory::getFactory()
 
 bool SDL2BackendFactory::init()
 {
+    int numDrivers = SDL_GetNumAudioDrivers();
+    fprintf(stderr, "[OpenAL SDL2] %d SDL audio driver(s) registered:", numDrivers);
+    for (int i = 0; i < numDrivers; i++)
+        fprintf(stderr, " %s", SDL_GetAudioDriver(i));
+    fprintf(stderr, "\n");
+    fprintf(stderr, "[OpenAL SDL2] SDL_WasInit(SDL_INIT_VIDEO)=%d SDL_WasInit(SDL_INIT_AUDIO)=%d\n",
+        SDL_WasInit(SDL_INIT_VIDEO) != 0, SDL_WasInit(SDL_INIT_AUDIO) != 0);
+
     bool ok = (SDL_InitSubSystem(SDL_INIT_AUDIO) == 0);
     if (!ok)
         fprintf(stderr, "[OpenAL SDL2] SDL_InitSubSystem(SDL_INIT_AUDIO) failed: %s\n", SDL_GetError());
+    else
+        fprintf(stderr, "[OpenAL SDL2] SDL_InitSubSystem(SDL_INIT_AUDIO) succeeded, current driver: %s\n",
+            SDL_GetCurrentAudioDriver());
     return ok;
 }
 
