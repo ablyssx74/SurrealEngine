@@ -1427,6 +1427,52 @@ void GLRenderDevice::DrawComplexSurface(SceneNode* Frame, SurfaceInfo& Surface, 
 	if (debugForceNulltexWorld)
 		info.tex = nulltex;
 	info.lightmap = Textures->GetTexture(Surface.LightMap, false);
+
+	// Diagnostic escape hatch: set SE_DEBUG_READBACK_LIGHTMAP=1 to run the exact same GPU
+	// readback as SE_DEBUG_READBACK_WORLDTEX, but on the lightmap texture instead of the base
+	// texture. Base textures are proven correct on the GPU and are legitimately dim by design
+	// (meant to be multiplied up by the lightmap), so if the lightmap itself reads back as
+	// black, that alone would fully explain "dim base * black lightmap = pure black" without
+	// the base texture being at fault at all - a texture we've never actually verified before.
+	static const bool debugReadbackLightmap = std::getenv("SE_DEBUG_READBACK_LIGHTMAP") != nullptr;
+	static std::vector<GLuint> debugReadbackLightmapSeen;
+	if (debugReadbackLightmap && debugReadbackLightmapSeen.size() < 8 && info.lightmap != nulltex && info.lightmap->Texture)
+	{
+		GLuint handle = info.lightmap->Texture->Handle;
+		bool alreadySeen = std::find(debugReadbackLightmapSeen.begin(), debugReadbackLightmapSeen.end(), handle) != debugReadbackLightmapSeen.end();
+		GLint w = 0, h = 0;
+		glBindTexture(GL_TEXTURE_2D, handle);
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h);
+		if (!alreadySeen && w > 0 && h > 0)
+		{
+			debugReadbackLightmapSeen.push_back(handle);
+			std::vector<uint8_t> pixels(static_cast<size_t>(w) * h * 4);
+			glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+			GLenum err = glGetError();
+			size_t center = ((pixels.size() / 2) / 4) * 4;
+			int nonblack = 0;
+			uint64_t sumR = 0, sumG = 0, sumB = 0;
+			for (size_t i = 0; i < pixels.size(); i += 4)
+			{
+				if (pixels[i] || pixels[i + 1] || pixels[i + 2])
+					nonblack++;
+				sumR += pixels[i];
+				sumG += pixels[i + 1];
+				sumB += pixels[i + 2];
+			}
+			uint32_t texelCount = static_cast<uint32_t>(w) * h;
+			fprintf(stderr, "[Readback] Lightmap handle=%u %dx%d glGetTexImage err=0x%04x\n",
+				handle, w, h, err);
+			fprintf(stderr, "[Readback] %d/%u texels non-black. Avg=(%u,%u,%u) First=(%u,%u,%u,%u) Center=(%u,%u,%u,%u)\n",
+				nonblack, texelCount,
+				(unsigned)(sumR / texelCount), (unsigned)(sumG / texelCount), (unsigned)(sumB / texelCount),
+				pixels[0], pixels[1], pixels[2], pixels[3],
+				pixels[center], pixels[center + 1], pixels[center + 2], pixels[center + 3]);
+		}
+		glBindTexture(GL_TEXTURE_2D, 0);
+	}
+
 	info.macrotex = Textures->GetTexture(Surface.MacroTexture, false);
 	info.detailtex = Textures->GetTexture(Surface.DetailTexture, false);
 	info.fogmap = (Surface.FogMap && Surface.FogMap->NumMips > 0 && !Surface.FogMap->Mips[0].Data.empty()) ?
