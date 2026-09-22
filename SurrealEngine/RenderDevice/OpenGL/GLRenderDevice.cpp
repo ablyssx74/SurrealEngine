@@ -8,6 +8,7 @@
 #include "Math/halffloat.h"
 #include "Packages/Engine/Resources/Level/UModel.h"
 #include <surrealwidgets/core/widget.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -1345,37 +1346,46 @@ void GLRenderDevice::DrawComplexSurface(SceneNode* Frame, SurfaceInfo& Surface, 
 	info.facet = &Facet;
 	info.tex = Textures->GetTexture(Surface.Texture, !!(PolyFlags & PF_Masked));
 
-	// Diagnostic escape hatch: set SE_DEBUG_READBACK_WORLDTEX=1 to read a real world surface's
-	// base texture straight back from the GPU (via glGetTexImage) right after it's bound here,
-	// and print a few sample texels. This tells apart "the GPU-resident copy is already black"
-	// (an upload-side driver bug) from "the copy is fine but sampling it at draw time returns
-	// black" (a binding/sampler driver bug). Printed once, for the first real (non-nulltex)
-	// world texture encountered.
+	// Diagnostic escape hatch: set SE_DEBUG_READBACK_WORLDTEX=1 to read real world surfaces'
+	// base textures straight back from the GPU (via glGetTexImage) right after they're bound
+	// here, and print stats + a few sample texels. This tells apart "the GPU-resident copy is
+	// already black" (an upload-side driver bug) from "the copy is fine but sampling it at draw
+	// time returns black" (a binding/sampler driver bug). Printed for the first several DISTINCT
+	// real (non-nulltex), reasonably large (>=128px wide - skips tiny HUD/icon textures that may
+	// be legitimately near-black by design) world textures encountered.
 	static const bool debugReadbackWorldTex = std::getenv("SE_DEBUG_READBACK_WORLDTEX") != nullptr;
-	static bool debugReadbackWorldTexDone = false;
-	if (debugReadbackWorldTex && !debugReadbackWorldTexDone && info.tex != nulltex && info.tex->Texture)
+	static std::vector<GLuint> debugReadbackWorldTexSeen;
+	if (debugReadbackWorldTex && debugReadbackWorldTexSeen.size() < 8 && info.tex != nulltex && info.tex->Texture)
 	{
-		debugReadbackWorldTexDone = true;
+		GLuint handle = info.tex->Texture->Handle;
+		bool alreadySeen = std::find(debugReadbackWorldTexSeen.begin(), debugReadbackWorldTexSeen.end(), handle) != debugReadbackWorldTexSeen.end();
 		GLint w = 0, h = 0;
-		glBindTexture(GL_TEXTURE_2D, info.tex->Texture->Handle);
+		glBindTexture(GL_TEXTURE_2D, handle);
 		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
 		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h);
-		if (w > 0 && h > 0)
+		if (!alreadySeen && w >= 128 && h >= 128)
 		{
+			debugReadbackWorldTexSeen.push_back(handle);
 			std::vector<uint8_t> pixels(static_cast<size_t>(w) * h * 4);
 			glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
 			GLenum err = glGetError();
 			size_t center = ((pixels.size() / 2) / 4) * 4;
 			int nonblack = 0;
+			uint64_t sumR = 0, sumG = 0, sumB = 0;
 			for (size_t i = 0; i < pixels.size(); i += 4)
 			{
 				if (pixels[i] || pixels[i + 1] || pixels[i + 2])
 					nonblack++;
+				sumR += pixels[i];
+				sumG += pixels[i + 1];
+				sumB += pixels[i + 2];
 			}
+			uint32_t texelCount = static_cast<uint32_t>(w) * h;
 			fprintf(stderr, "[Readback] World base tex handle=%u %dx%d glGetTexImage err=0x%04x\n",
-				info.tex->Texture->Handle, w, h, err);
-			fprintf(stderr, "[Readback] %d/%d texels non-black. First=(%u,%u,%u,%u) Center=(%u,%u,%u,%u)\n",
-				nonblack, w * h,
+				handle, w, h, err);
+			fprintf(stderr, "[Readback] %d/%u texels non-black. Avg=(%u,%u,%u) First=(%u,%u,%u,%u) Center=(%u,%u,%u,%u)\n",
+				nonblack, texelCount,
+				(unsigned)(sumR / texelCount), (unsigned)(sumG / texelCount), (unsigned)(sumB / texelCount),
 				pixels[0], pixels[1], pixels[2], pixels[3],
 				pixels[center], pixels[center + 1], pixels[center + 2], pixels[center + 3]);
 		}
