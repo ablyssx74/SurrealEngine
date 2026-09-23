@@ -1627,6 +1627,13 @@ void Engine::OnWindowMouseDown(const Point& pos, EInputKey key)
 	if (playingAvi)
 		return;
 
+	// A click into the game window is the clearest possible sign the player is engaging with
+	// it, and unlike a real OS focus-gained event, it's reliably delivered even in cases where
+	// the window technically never lost focus from SDL's point of view (e.g. clicking back into
+	// a windowed-mode window right after resizing it) - a gap OnWindowActivated() alone doesn't
+	// cover. See ReassertCursorLock().
+	ReassertCursorLock();
+
 	if (engine->dxRootWindow && engine->dxRootWindow->OnWindowMouseDown(pos, key))
 		return;
 

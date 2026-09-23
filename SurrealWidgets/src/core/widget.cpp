@@ -278,6 +278,12 @@ void Widget::Show()
 	{
 		CheckInitialShow();
 		DispWindow->Show();
+		// Don't rely solely on the OS delivering a timely "window shown/exposed" event to
+		// trigger the first paint - on some platforms (e.g. SDL3 on Haiku) that can be delayed
+		// long enough that the window sits blank until some other event (a mouse move, a
+		// resize) incidentally kicks a repaint loose. Update() queues an explicit paint request
+		// through the toolkit's own event queue instead, which isn't at the mercy of that.
+		Update();
 	}
 	else if (HiddenFlag)
 	{
@@ -292,6 +298,7 @@ void Widget::ShowFullscreen()
 	{
 		CheckInitialShow();
 		DispWindow->ShowFullscreen();
+		Update();
 	}
 }
 
@@ -310,6 +317,7 @@ void Widget::ShowMaximized()
 	{
 		CheckInitialShow();
 		DispWindow->ShowMaximized();
+		Update();
 	}
 }
 
@@ -328,6 +336,7 @@ void Widget::ShowNormal()
 	{
 		CheckInitialShow();
 		DispWindow->ShowNormal();
+		Update();
 	}
 }
 
