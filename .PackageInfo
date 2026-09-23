@@ -1,0 +1,38 @@
+name			SurrealEngine
+version			1.0.0-1
+architecture	x86_64
+summary 		"Surreal Engine"
+description 	"Plays Unreal Tournament v436 and other supported games. Map and UT binary files required.
+
+To Play:
+Note: v436 works really well. Anything higher may not work as well.
+
+1. Place UnrealTournament99 Game Folder in /boot/home/UnrealTournament_cd_436_patch as so
+2. Open Terminal to /boot/system/apps/SurrealEngine/bin
+3. Copy and Paste this into Terminal:
+SE_DEBUG_FORCE_NULLTEX_WORLD=1 ./SurrealEngine /boot/home/UnrealTournament_cd_436_patch/
+
+Currently, map lighting textures is broken and that's why SE_DEBUG_FORCE_NULLTEX_WORLD=1 is used.
+But hopefully will get that fixed soon :)
+
+Other known issue: The main startup SDL window appears blank. Moving the mouse around or resizing window fixes that."
+packager		"ablyss <SurrealEngine@epluribusunix.net>"
+vendor			"epluribusunix.net Project"
+licenses {
+	"MIT"
+}
+copyrights {
+	"2026 ablyss"
+}
+provides {
+	SurrealEngine = 1.0.0-1	
+}
+requires {
+	haiku
+	libsdl2
+	libsdl3
+	openal
+}	
+urls {
+	"https://github.com/ablyssx74/SurrealEngine"
+}
