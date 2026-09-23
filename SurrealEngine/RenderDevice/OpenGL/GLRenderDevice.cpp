@@ -1346,6 +1346,25 @@ void GLRenderDevice::DrawComplexSurface(SceneNode* Frame, SurfaceInfo& Surface, 
 	info.facet = &Facet;
 	info.tex = Textures->GetTexture(Surface.Texture, !!(PolyFlags & PF_Masked));
 
+	// Diagnostic escape hatch: set SE_DEBUG_FORCE_FIRST_REAL_TEX=1 to reuse the FIRST real
+	// (non-nulltex) world texture encountered for every subsequent world surface, instead of
+	// each surface's own texture. Real textures sample as black no matter what (upload
+	// correctness, mip completeness, a real shader interface bug, forced LOD 0, immutable
+	// storage - all ruled out or fixed with no change), while nulltex - reused unchanged for
+	// every world draw call - is proven to work. This isolates "real (non-1x1) textures are
+	// broken" from "switching between many different bound textures across draw calls is
+	// broken": a real texture reused with zero churn behaves like nulltex if it's the latter,
+	// or still fails if it's the former.
+	static const bool debugForceFirstRealTex = std::getenv("SE_DEBUG_FORCE_FIRST_REAL_TEX") != nullptr;
+	static GLCachedTexture* debugFirstRealTex = nullptr;
+	if (debugForceFirstRealTex)
+	{
+		if (!debugFirstRealTex && info.tex != nulltex)
+			debugFirstRealTex = info.tex;
+		if (debugFirstRealTex)
+			info.tex = debugFirstRealTex;
+	}
+
 	// Diagnostic escape hatch: set SE_DEBUG_READBACK_WORLDTEX=1 to read real world surfaces'
 	// base textures straight back from the GPU (via glGetTexImage) right after they're bound
 	// here, and print stats + a few sample texels. This tells apart "the GPU-resident copy is
