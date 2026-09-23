@@ -43,18 +43,7 @@ void GLUploadManager::UploadTexture(GLCachedTexture* tex, const TextureInfo& Inf
 		uploader = nullptr;
 	}
 
-	GLint internalFormat = GL_RGBA8;
-	GLenum format = GL_RGBA;
-	GLenum type = GL_UNSIGNED_BYTE;
-	if (uploader)
-	{
-		internalFormat = uploader->GetInternalformat();
-		if (uploader->GetFormat() != 0)
-		{
-			format = uploader->GetFormat();
-			type = uploader->GetType();
-		}
-	}
+	GLint internalFormat = uploader ? uploader->GetInternalformat() : GL_RGBA8;
 
 	// Base texture must use complete 4x4 compression blocks in Direct3D 11 or some drivers crash.
 	// It is unclear if some OpenGL drivers have the same problem or not.
@@ -85,15 +74,14 @@ void GLUploadManager::UploadTexture(GLCachedTexture* tex, const TextureInfo& Inf
 
 		tex->Texture = std::make_shared<GLTexture2D>();
 		glBindTexture(GL_TEXTURE_2D, tex->Texture->Handle);
-		int mipwidth = width;
-		int mipheight = height;
-		for (int miplevel = 0; miplevel < mipcount; miplevel++)
-		{
-			glTexImage2D(GL_TEXTURE_2D, miplevel, internalFormat, mipwidth, mipheight, 0, format, type, nullptr);
-			ThrowIfGLError("UploadTexture failed");
-			mipwidth = std::max(mipwidth >> 1, 1);
-			mipheight = std::max(mipheight >> 1, 1);
-		}
+		// Immutable storage (one glTexStorage2D call, fixed level count/size/format up front)
+		// instead of the previous per-level glTexImage2D calls. Both are valid ways to allocate
+		// a GL texture, but a mutable texture built up via repeated glTexImage2D re-specification
+		// is a harder case for Zink to translate into a single Vulkan image - it may need to
+		// recreate the underlying image as levels get (re)specified. Immutable storage maps
+		// directly onto one fixed-size Vulkan image from the start.
+		glTexStorage2D(GL_TEXTURE_2D, std::max(mipcount, 1), internalFormat, width, height);
+		ThrowIfGLError("UploadTexture failed");
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, std::max(mipcount - 1, 0));
 	}
 
@@ -168,8 +156,11 @@ void GLUploadManager::UploadData(GLTexture2D* image, const TextureInfo& Info, bo
 			}
 			else
 			{
+				// glCompressedTexSubImage2D, not glCompressedTexImage2D: the texture's storage
+				// is now immutable (allocated once via glTexStorage2D in UploadTexture), and
+				// re-specifying a level's image is illegal on an immutable-storage texture.
 				glBindTexture(GL_TEXTURE_2D, image->Handle);
-				glCompressedTexImage2D(GL_TEXTURE_2D, level + dummyMipmapCount, uploader->GetInternalformat(), mipwidth, mipheight, 0, mipsize, data);
+				glCompressedTexSubImage2D(GL_TEXTURE_2D, level + dummyMipmapCount, 0, 0, mipwidth, mipheight, uploader->GetInternalformat(), mipsize, data);
 				ThrowIfGLError("UploadData(compressed) failed");
 			}
 
