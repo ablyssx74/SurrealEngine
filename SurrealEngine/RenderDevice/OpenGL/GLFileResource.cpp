@@ -80,7 +80,14 @@ std::string GLFileResource::readAllText(const std::string& filename)
 				return vec4(clamp((c.rgb - cutoff) / (1.0 - cutoff), 0.0, 1.0), c.a);
 			}
 
-			vec4 textureTex(vec2 uv) { return texture(tex, uv); }
+			// Debug escape hatch (flag bit 512, SE_DEBUG_FORCE_LOD0): bypass the driver's
+			// automatically-computed (screen-space-derivative-based) LOD entirely and always
+			// sample mip level 0 of the base texture. World surfaces are large, often
+			// screen-filling polygons with much steeper per-pixel texture-coordinate
+			// derivatives than a typical mesh, so if the driver's automatic LOD selection is
+			// landing on an inappropriately high (small) mip level for them, this isolates
+			// that from every other explanation already ruled out.
+			vec4 textureTex(vec2 uv) { return ((flags & 512u) != 0u) ? textureLod(tex, uv, 0.0) : texture(tex, uv); }
 			vec4 textureMacro(vec2 uv) { return texture(macro, uv); }
 			vec4 textureDetail(vec2 uv) { return texture(detail, uv); }
 			vec4 textureLightmap(vec2 uv) { return texture(lightmap, uv); }

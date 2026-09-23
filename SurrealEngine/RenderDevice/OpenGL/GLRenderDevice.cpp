@@ -1516,9 +1516,17 @@ void GLRenderDevice::DrawComplexSurfaceFaces(const ComplexSurfaceInfo& info)
 	// whether the base texture sample itself is the black culprit.
 	static const bool debugShowBaseTex = std::getenv("SE_DEBUG_SHOW_BASETEX") != nullptr;
 
+	// Diagnostic escape hatch: set SE_DEBUG_FORCE_LOD0=1 to bypass the driver's automatically
+	// computed (screen-space-derivative-based) LOD for the base texture and always sample mip
+	// level 0. World surfaces are large, often screen-filling polygons with much steeper
+	// per-pixel texture-coordinate derivatives than a typical mesh - if automatic LOD selection
+	// is landing on an inappropriately high (small) mip level for them, this isolates that.
+	static const bool debugForceLod0 = std::getenv("SE_DEBUG_FORCE_LOD0") != nullptr;
+
 	uint32_t flags = 0;
 	if (debugMagenta) flags |= 128;
 	if (debugShowBaseTex) flags |= 256;
+	if (debugForceLod0) flags |= 512;
 	if (info.lightmap != nulltex && !disableLightmap) flags |= 1;
 	if (info.macrotex != nulltex) flags |= 2;
 	if (info.detailtex != nulltex && info.fogmap == nulltex) flags |= 4;
