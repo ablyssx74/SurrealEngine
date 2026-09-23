@@ -12,10 +12,15 @@ Note: v436 works really well. Anything higher may not work as well.
 3. Copy and Paste this into Terminal:
 SE_DEBUG_FORCE_NULLTEX_WORLD=1 ./SurrealEngine /boot/home/UnrealTournament_cd_436_patch/
 
-Currently, map lighting textures is broken and that's why SE_DEBUG_FORCE_NULLTEX_WORLD=1 is used.
+Main Issue:
+1. Currently, map lighting textures is broken and that's why SE_DEBUG_FORCE_NULLTEX_WORLD=1 is used.
 But hopefully will get that fixed soon :)
 
-Other known issue: The main startup SDL window appears blank. Moving the mouse around or resizing window fixes that."
+Other known issues: 
+1. The main startup SDL window appears blank. Moving the mouse around or resizing window fixes that.
+2. Exiting fullscreen and trying to move the game window sometimes jumps to bottom right corner.
+3. Characters appear dark.
+4. Networking is missing."
 packager		"ablyss <SurrealEngine@epluribusunix.net>"
 vendor			"epluribusunix.net Project"
 licenses {
