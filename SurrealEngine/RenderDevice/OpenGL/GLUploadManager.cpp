@@ -105,6 +105,17 @@ void GLUploadManager::UploadTexture(GLCachedTexture* tex, const TextureInfo& Inf
 			ThrowIfGLError("UploadTexture failed");
 		}
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, std::max(mipcount - 1, 0));
+
+		// Force an explicit identity swizzle rather than trusting the driver's default. Nothing
+		// in this codebase ever sets GL_TEXTURE_SWIZZLE_* - glGetTexImage retrieves the raw
+		// stored texel data, bypassing swizzle entirely, while texture()/textureLod() in a
+		// shader applies it as part of the fetch. A GPU readback of a real world texture has
+		// been proven to exactly match its source data, yet sampling that same texture in the
+		// scene shader (at any LOD, with zero texture-unit churn) still returns black - a
+		// mismatch that's consistent with a bad *default* swizzle state on this driver for
+		// textures created this way, which a readback would never reveal.
+		GLint identitySwizzle[4] = { GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA };
+		glTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_RGBA, identitySwizzle);
 	}
 
 	if (uploader)
