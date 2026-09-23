@@ -1566,6 +1566,19 @@ void GLRenderDevice::DrawComplexSurfaceFaces(const ComplexSurfaceInfo& info)
 	// is landing on an inappropriately high (small) mip level for them, this isolates that.
 	static const bool debugForceLod0 = std::getenv("SE_DEBUG_FORCE_LOD0") != nullptr;
 
+	// Diagnostic escape hatch: set SE_DEBUG_WRAP_TEXCOORD=1 to pre-wrap the base texture's s/t
+	// coordinates into [0,1) on the CPU before upload, instead of relying on the GPU's GL_REPEAT
+	// wrapping. World surface UVs are computed here from world-space positions (u - UPan) * UMult,
+	// which for a normal-sized level can land far outside [0,1] (tens to hundreds) - the sampler
+	// is expected to fold that back down via GL_REPEAT. Mesh (Gouraud) UVs are already close to
+	// [0,1] by contrast. SE_DEBUG_FORCE_LOD0 already ruled out automatic derivative-based LOD
+	// selection as the culprit, but textureLod() still goes through the same GPU-side wrap logic -
+	// this isolates whether wrapping a large out-of-range REPEAT coordinate is itself broken on
+	// this Zink/NVK driver, independent of which LOD gets sampled. Wrapping per-vertex like this
+	// will visibly tear the texture across the polygon (expected/harmless for this test) - the
+	// only thing that matters is whether real texture detail appears at all instead of solid black.
+	static const bool debugWrapTexCoord = std::getenv("SE_DEBUG_WRAP_TEXCOORD") != nullptr;
+
 	uint32_t flags = 0;
 	if (debugMagenta) flags |= 128;
 	if (debugShowBaseTex) flags |= 256;
@@ -1623,8 +1636,15 @@ void GLRenderDevice::DrawComplexSurfaceFaces(const ComplexSurfaceInfo& info)
 			vptr->Position.x = point.x;
 			vptr->Position.y = point.y;
 			vptr->Position.z = point.z;
-			vptr->TexCoord.s = (u - UPan) * UMult;
-			vptr->TexCoord.t = (v - VPan) * VMult;
+			float texS = (u - UPan) * UMult;
+			float texT = (v - VPan) * VMult;
+			if (debugWrapTexCoord)
+			{
+				texS -= std::floor(texS);
+				texT -= std::floor(texT);
+			}
+			vptr->TexCoord.s = texS;
+			vptr->TexCoord.t = texT;
 			vptr->TexCoord2.s = (u - LMUPan) * LMUMult;
 			vptr->TexCoord2.t = (v - LMVPan) * LMVMult;
 			vptr->TexCoord3.s = (u - MacroUPan) * MacroUMult;
