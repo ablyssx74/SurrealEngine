@@ -123,6 +123,22 @@ void GLUploadManager::UploadTexture(GLCachedTexture* tex, const TextureInfo& Inf
 	else
 		UploadWhite(tex->Texture.get());
 
+	// Diagnostic escape hatch: set SE_DEBUG_FINISH_AFTER_UPLOAD=1 to force a full GPU sync
+	// (glFinish) right after every texture upload completes. World surface textures are
+	// proven byte-correct via glGetTexImage readback immediately after upload, yet sampling
+	// that same texture from the scene shader in a later (batched/deferred) draw call still
+	// returns black - every state-based explanation (mips, shader interface, LOD, storage
+	// mode, swizzle, UV wrapping) has been ruled out with no effect. nulltex and most mesh
+	// textures are uploaded well before they're first sampled, giving the driver plenty of
+	// time to complete the transfer; a world surface's base texture may get uploaded and
+	// sampled in much tighter proximity within the same frame. This tests whether Zink/NVK is
+	// missing a write-before-read synchronization barrier between the texture upload (a
+	// transfer/copy operation under the hood) and the shader sampling it - forcing a full
+	// pipeline stall here would mask that class of bug and confirm it.
+	static const bool debugFinishAfterUpload = std::getenv("SE_DEBUG_FINISH_AFTER_UPLOAD") != nullptr;
+	if (debugFinishAfterUpload)
+		glFinish();
+
 	renderer->Stats.Uploads++;
 }
 
