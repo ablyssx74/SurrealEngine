@@ -144,6 +144,14 @@ void SDL3DisplayWindow::SetClientFrame(const Rect& box)
 void SDL3DisplayWindow::Show()
 {
 	SDL_ShowWindow(Handle.window);
+	// SDL_ShowWindow() can return before the window manager has actually finished mapping the
+	// window (on Haiku this is a real round-trip to the app_server, since its windowing is
+	// client-server). Widget::Show() paints and presents a frame right after this call returns,
+	// and if that races ahead of the window actually being on screen, the presented frame is
+	// silently lost - the window then sits blank until some later, real event (a mouse move, a
+	// resize) triggers another paint after the window has caught up. Block here until the show
+	// is actually finalized so the paint that follows lands on a window that's really visible.
+	SDL_SyncWindow(Handle.window);
 }
 
 void SDL3DisplayWindow::ShowFullscreen()
@@ -151,12 +159,14 @@ void SDL3DisplayWindow::ShowFullscreen()
 	SDL_ShowWindow(Handle.window);
 	SDL_SetWindowFullscreen(Handle.window, true);
 	isFullscreen = true;
+	SDL_SyncWindow(Handle.window);
 }
 
 void SDL3DisplayWindow::ShowMaximized()
 {
 	SDL_ShowWindow(Handle.window);
 	SDL_MaximizeWindow(Handle.window);
+	SDL_SyncWindow(Handle.window);
 }
 
 void SDL3DisplayWindow::ShowMinimized()
@@ -170,6 +180,7 @@ void SDL3DisplayWindow::ShowNormal()
 	SDL_ShowWindow(Handle.window);
 	SDL_SetWindowFullscreen(Handle.window, false);
 	isFullscreen = false;
+	SDL_SyncWindow(Handle.window);
 }
 
 void SDL3DisplayWindow::SetWindowResizable(bool enable)

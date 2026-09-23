@@ -1425,7 +1425,31 @@ void GLRenderDevice::DrawComplexSurface(SceneNode* Frame, SurfaceInfo& Surface, 
 	// in the binding/pipeline for this draw call, not any specific texture's content.
 	static const bool debugForceNulltexWorld = std::getenv("SE_DEBUG_FORCE_NULLTEX_WORLD") != nullptr;
 	if (debugForceNulltexWorld)
+	{
 		info.tex = nulltex;
+	}
+#ifdef __HAIKU__
+	else
+	{
+		// Sampling a real (non-nulltex) base texture on world surfaces renders solid black on
+		// this platform's Zink/NVK driver - a bug we've been unable to root-cause despite
+		// confirming the uploaded texture data itself is correct, the binding/draw pipeline is
+		// correct, mip completeness, a real shader stage interface mismatch, automatic LOD
+		// selection, and mutable-vs-immutable texture storage. As a stopgap, substitute the
+		// known-good nulltex (proven to sample correctly) and tint it with the real texture's
+		// own average color instead, so world surfaces at least show approximately the right
+		// color and correct lighting instead of solid black. This loses all texture detail and
+		// pattern - not a real fix, just makes the game visually playable in the meantime.
+		// Set SE_DISABLE_TEXTURE_WORKAROUND=1 to fall back to real (currently black) sampling,
+		// e.g. to re-test whether a future driver update has fixed the underlying bug.
+		static const bool disableWorkaround = std::getenv("SE_DISABLE_TEXTURE_WORKAROUND") != nullptr;
+		if (!disableWorkaround)
+		{
+			info.texcolor = vec4(info.tex->AverageColorR, info.tex->AverageColorG, info.tex->AverageColorB, 1.0f);
+			info.tex = nulltex;
+		}
+	}
+#endif
 	info.lightmap = Textures->GetTexture(Surface.LightMap, false);
 
 	// Diagnostic escape hatch: set SE_DEBUG_READBACK_LIGHTMAP=1 to run the exact same GPU
@@ -1557,6 +1581,7 @@ void GLRenderDevice::DrawComplexSurfaceFaces(const ComplexSurfaceInfo& info)
 	float DetailVMult = info.fogmap == nulltex ? info.detailtex->VMult : info.fogmap->VMult;
 
 	vec4 color = info.editorcolor ? *info.editorcolor : vec4(1.0f);
+	color *= info.texcolor;
 
 	auto pts = info.facet->Vertices;
 	uint32_t vcount = info.facet->VertexCount;
