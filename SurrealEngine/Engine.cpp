@@ -1718,10 +1718,14 @@ void Engine::OnWindowKeyUp(EInputKey key)
 
 void Engine::OnWindowGeometryChanged()
 {
-	// Fires (via SDL_EVENT_WINDOW_MOVED/PIXEL_SIZE_CHANGED/RESIZED) as the window settles
-	// into its final fullscreen bounds at startup, including before any real OS focus
-	// round-trip ever happens. See ReassertCursorLock().
-	ReassertCursorLock();
+	// Used to call ReassertCursorLock() here (fires via SDL_EVENT_WINDOW_MOVED/
+	// PIXEL_SIZE_CHANGED/RESIZED), meant to catch the window settling into its final
+	// fullscreen bounds at startup. But this event also fires continuously while the player
+	// manually drags a windowed (non-fullscreen) window's edge to resize it, and forcing an
+	// unlock+relock of relative mouse mode mid-drag fought with the window manager's own
+	// mouse tracking for that drag - on Haiku this made the window jump to the corner and
+	// shrink instead of resizing normally. OnWindowPaint() (SHOWN/EXPOSED) already covers the
+	// startup case without that problem, so don't duplicate it here.
 }
 
 void Engine::OnWindowClose()

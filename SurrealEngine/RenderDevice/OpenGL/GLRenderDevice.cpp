@@ -1603,37 +1603,65 @@ void GLRenderDevice::DrawGouraudPolygon(SceneNode* Frame, TextureInfo& Info, con
 	GLCachedTexture* tex = Textures->GetTexture(&Info, !!(PolyFlags & PF_Masked));
 
 	// Diagnostic escape hatch: set SE_DEBUG_READBACK_MESHTEX=1 for the same GPU-readback check
-	// as SE_DEBUG_READBACK_WORLDTEX, but for the first real Gouraud/mesh texture instead of a
-	// world surface. Meshes render fine while world surfaces render black, so comparing these
-	// two readbacks tells us whether the GPU-resident copy actually differs between the two, or
-	// whether both are fine and the bug is specific to how world surfaces get drawn.
+	// as SE_DEBUG_READBACK_WORLDTEX, but for real Gouraud/mesh textures instead of world
+	// surfaces. A bot rendered as a flat black silhouette (zero shading variation, same visual
+	// signature as the black world surfaces) suggests this isn't strictly a world-vs-mesh split
+	// after all - some specific mesh textures may fail the exact same way. Capture several
+	// distinct, reasonably sized ones (not tiny HUD icons) and compare each against its own
+	// CPU-side source data, the same way SE_DEBUG_READBACK_WORLDTEX does.
 	static const bool debugReadbackMeshTex = std::getenv("SE_DEBUG_READBACK_MESHTEX") != nullptr;
-	static bool debugReadbackMeshTexDone = false;
-	if (debugReadbackMeshTex && !debugReadbackMeshTexDone && tex != nulltex && tex->Texture)
+	static std::vector<GLuint> debugReadbackMeshTexSeen;
+	if (debugReadbackMeshTex && debugReadbackMeshTexSeen.size() < 8 && tex != nulltex && tex->Texture)
 	{
-		debugReadbackMeshTexDone = true;
+		GLuint handle = tex->Texture->Handle;
+		bool alreadySeen = std::find(debugReadbackMeshTexSeen.begin(), debugReadbackMeshTexSeen.end(), handle) != debugReadbackMeshTexSeen.end();
 		GLint w = 0, h = 0;
-		glBindTexture(GL_TEXTURE_2D, tex->Texture->Handle);
+		glBindTexture(GL_TEXTURE_2D, handle);
 		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
 		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h);
-		if (w > 0 && h > 0)
+		if (!alreadySeen && w >= 64 && h >= 64)
 		{
+			debugReadbackMeshTexSeen.push_back(handle);
 			std::vector<uint8_t> pixels(static_cast<size_t>(w) * h * 4);
 			glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
 			GLenum err = glGetError();
 			size_t center = ((pixels.size() / 2) / 4) * 4;
 			int nonblack = 0;
+			uint64_t sumR = 0, sumG = 0, sumB = 0;
 			for (size_t i = 0; i < pixels.size(); i += 4)
 			{
 				if (pixels[i] || pixels[i + 1] || pixels[i + 2])
 					nonblack++;
+				sumR += pixels[i];
+				sumG += pixels[i + 1];
+				sumB += pixels[i + 2];
 			}
+			uint32_t texelCount = static_cast<uint32_t>(w) * h;
 			fprintf(stderr, "[Readback] Mesh tex handle=%u %dx%d glGetTexImage err=0x%04x\n",
-				tex->Texture->Handle, w, h, err);
-			fprintf(stderr, "[Readback] %d/%d texels non-black. First=(%u,%u,%u,%u) Center=(%u,%u,%u,%u)\n",
-				nonblack, w * h,
+				handle, w, h, err);
+			fprintf(stderr, "[Readback] %d/%u texels non-black. Avg=(%u,%u,%u) First=(%u,%u,%u,%u) Center=(%u,%u,%u,%u)\n",
+				nonblack, texelCount,
+				(unsigned)(sumR / texelCount), (unsigned)(sumG / texelCount), (unsigned)(sumB / texelCount),
 				pixels[0], pixels[1], pixels[2], pixels[3],
 				pixels[center], pixels[center + 1], pixels[center + 2], pixels[center + 3]);
+
+			if (Info.Format == TextureFormat::P8 && Info.Palette && Info.NumMips > 0 && Info.Mips && !Info.Mips[0].Data.empty())
+			{
+				const UnrealMipmap& mip = Info.Mips[0];
+				const TextureColor* palette = Info.Palette;
+				uint64_t cpuSumR = 0, cpuSumG = 0, cpuSumB = 0;
+				size_t texelN = (size_t)mip.Width * mip.Height;
+				for (size_t i = 0; i < texelN && i < mip.Data.size(); i++)
+				{
+					const TextureColor& c = palette[mip.Data[i]];
+					cpuSumR += c.R;
+					cpuSumG += c.G;
+					cpuSumB += c.B;
+				}
+				fprintf(stderr, "[Readback] CPU source (P8+palette) for same texture: %dx%d Avg=(%u,%u,%u)\n",
+					mip.Width, mip.Height,
+					(unsigned)(cpuSumR / texelN), (unsigned)(cpuSumG / texelN), (unsigned)(cpuSumB / texelN));
+			}
 		}
 		glBindTexture(GL_TEXTURE_2D, 0);
 	}
