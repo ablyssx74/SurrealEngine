@@ -82,7 +82,7 @@ public:
 	std::string GetDefUserIniValue(const NameString& sectionName, const NameString& keyName, std::string default_value = "", const int index = 0);
 	Array<std::string> GetDefUserIniValues(const NameString& sectionName, const NameString& keyName, Array<std::string> default_values = {});
 	void SetIniValue(NameString iniName, const NameString& sectionName, const NameString& keyName, const std::string& newValue, const int index = 0);
-	void SetIniValues(NameString iniName, const NameString& sectionName, const NameString& keyName, const Array<std::string>& newValues);
+	void SetIniValues(NameString iniName, const NameString& sectionName, const NameString& keyName, const Array<std::string>& newValues, const bool indexed = false);
 	void SaveAllIniFiles();
 
 	std::string GetVideoFilename(const std::string& name);
@@ -103,6 +103,7 @@ private:
 	std::unique_ptr<IniFile>& LoadUserIniFile();
 	std::unique_ptr<IniFile>& LoadSystemIniFile();
 	void LoadEngineIniFiles();
+	void UpdateDeadMasterServerAddresses();
 	void LoadFileExtensions();
 	void LoadIntFiles();
 	void LoadPackageRemaps();

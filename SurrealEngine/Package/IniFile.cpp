@@ -154,10 +154,10 @@ void IniFile::SetValue(const NameString& sectionName, const NameString& keyName,
 	}
 }
 
-void IniFile::SetValues(const NameString& sectionName, const NameString& keyName, const Array<std::string>& newValues)
+void IniFile::SetValues(const NameString& sectionName, const NameString& keyName, const Array<std::string>& newValues, const bool indexed)
 {
 	IniSection& section = AddUniqueSection(sectionName.ToString());
-	if (section.SetValues(keyName, newValues))
+	if (section.SetValues(keyName, newValues, indexed))
 	{
 		isModified = true;
 		hasNewKeys = hasNewKeys || section.HasNewKey();

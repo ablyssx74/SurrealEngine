@@ -319,6 +319,7 @@ PackageManager::PackageManager(const GameLaunchInfo& launchInfo) : launchInfo(la
 	CreateTransientPackage();
 	RegisterFunctions();
 	LoadEngineIniFiles();
+	UpdateDeadMasterServerAddresses();
 	LoadFileExtensions();
 	LoadIntFiles();
 	LoadPackageRemaps();
@@ -792,9 +793,9 @@ void PackageManager::SetIniValue(NameString iniName, const NameString& sectionNa
 	LoadIniFile(iniName)->SetValue(sectionName, keyName, newValue, index);
 }
 
-void PackageManager::SetIniValues(NameString iniName, const NameString& sectionName, const NameString& keyName, const Array<std::string>& newValues)
+void PackageManager::SetIniValues(NameString iniName, const NameString& sectionName, const NameString& keyName, const Array<std::string>& newValues, const bool indexed)
 {
-	LoadIniFile(iniName)->SetValues(sectionName, keyName, newValues);
+	LoadIniFile(iniName)->SetValues(sectionName, keyName, newValues, indexed);
 }
 
 void PackageManager::SaveAllIniFiles()
@@ -857,6 +858,52 @@ void PackageManager::LoadEngineIniFiles()
 		iniFiles["User"] = std::make_unique<IniFile>((gameSystemFolderPath / userIniName).string());
 		defaultUserFile = std::make_unique<IniFile>((gameSystemFolderPath / "DefUser.ini").string());
 	}
+}
+
+void PackageManager::UpdateDeadMasterServerAddresses()
+{
+	// UT99's original master servers have all been offline for years (Epic shut theirs down in
+	// Dec 2022, GameSpy's closed back in 2014, mplayer.com is long gone too), so a stock install's
+	// ini - or an existing SE-[GameName].ini generated before this fix - still points server
+	// browsing at addresses that will never answer. Swap in currently-live, community-run
+	// replacements wherever these specific known-dead hostnames are still configured. This only
+	// ever touches these exact old addresses, so anything a user (or a community-updated ini
+	// they've installed) has deliberately pointed elsewhere - their own master server, say - is
+	// left untouched.
+	static const std::pair<std::string, std::string> replacements[] =
+	{
+		{ "unreal.epicgames.com", "master.oldunreal.com" },
+		{ "master0.gamespy.com", "master.333networks.com" },
+		{ "master.mplayer.com", "master.openspy.net" },
+	};
+
+	auto patchValues = [&](const NameString& section, const NameString& key, bool indexed)
+		{
+			Array<std::string> values = GetIniValues("System", section, key);
+			bool changed = false;
+			for (std::string& value : values)
+			{
+				for (const auto& replacement : replacements)
+				{
+					size_t pos = value.find(replacement.first);
+					if (pos != std::string::npos)
+					{
+						value.replace(pos, replacement.first.size(), replacement.second);
+						changed = true;
+					}
+				}
+			}
+			if (changed)
+				SetIniValues("System", section, key, values, indexed);
+		};
+
+	// ServerActors=IpServer.UdpServerUplink MasterServerAddress=... (only matters for hosting -
+	// this is the address a hosted server advertises itself to)
+	patchValues("Engine.GameEngine", "ServerActors", false);
+
+	// ListFactories[N]=UBrowser.UBrowserGSpyFact,MasterServerAddress=... (the address the client
+	// queries to populate the Internet server browser tab)
+	patchValues("UBrowserAll", "ListFactories", true);
 }
 
 void PackageManager::LoadFileExtensions()
