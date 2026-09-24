@@ -8,6 +8,7 @@
 #include "Utils/File.h"
 #include "Utils/StrTools.h"
 #include "VM/NativeFunc.h"
+#include <cstdlib>
 #include "Packages/ConSys/UConAudioList.h"
 #include "Packages/ConSys/UConCamera.h"
 #include "Packages/ConSys/UConChoice.h"
@@ -877,9 +878,19 @@ void PackageManager::UpdateDeadMasterServerAddresses()
 		{ "master.mplayer.com", "master.openspy.net" },
 	};
 
+	static const bool debugNet = std::getenv("SE_DEBUG_NET") != nullptr;
+
 	auto patchValues = [&](const NameString& section, const NameString& key, bool indexed)
 		{
 			Array<std::string> values = GetIniValues("System", section, key);
+			if (debugNet)
+			{
+				fprintf(stderr, "[Net] UpdateDeadMasterServerAddresses: [%s] %s has %d value(s) before patching\n",
+					section.ToString().c_str(), key.ToString().c_str(), (int)values.size());
+				for (const std::string& value : values)
+					fprintf(stderr, "[Net]   \"%s\"\n", value.c_str());
+			}
+
 			bool changed = false;
 			for (std::string& value : values)
 			{
@@ -893,8 +904,22 @@ void PackageManager::UpdateDeadMasterServerAddresses()
 					}
 				}
 			}
+
 			if (changed)
+			{
 				SetIniValues("System", section, key, values, indexed);
+				if (debugNet)
+				{
+					fprintf(stderr, "[Net] UpdateDeadMasterServerAddresses: [%s] %s patched:\n", section.ToString().c_str(), key.ToString().c_str());
+					for (const std::string& value : values)
+						fprintf(stderr, "[Net]   \"%s\"\n", value.c_str());
+				}
+			}
+			else if (debugNet)
+			{
+				fprintf(stderr, "[Net] UpdateDeadMasterServerAddresses: [%s] %s - no known-dead address found, nothing changed\n",
+					section.ToString().c_str(), key.ToString().c_str());
+			}
 		};
 
 	// ServerActors=IpServer.UdpServerUplink MasterServerAddress=... (only matters for hosting -
