@@ -244,7 +244,6 @@ void IniFile::UpdateFile(const std::string& filename)
 
 	Array<KeyOccurance> keyOccurrances;
 
-	bool key_has_brackets = false;
 	std::string ini_value;			// Value read from the ini file
 
 	for (auto line_it = lines.begin() ; line_it != lines.end() ; line_it++)
@@ -315,10 +314,21 @@ void IniFile::UpdateFile(const std::string& filename)
 					   right_bracket_pos = key.find(']');
 
 				int bracket_index = 0;
+				// Bug: key_has_brackets used to be declared once outside this loop and only ever
+				// set to true, never reset - so once any bracketed key appeared anywhere earlier
+				// in the file (extremely common: ServerListNames[0], IPPolicies[0], HiddenTypes[0]
+				// etc. all appear early), every later bare key for the rest of the WHOLE file
+				// (including completely unrelated sections like [Engine.Input]'s keybindings) took
+				// the indexed-lookup branch below instead of the correct plain-key one. Scoping it
+				// per-line, like bracket_index already correctly is, fixes that.
+				bool key_has_brackets = false;
 
 				if (left_bracket_pos != std::string::npos && right_bracket_pos != std::string::npos && left_bracket_pos < right_bracket_pos)
 				{
-					bracket_index = Convert::to_int32(key.substr(left_bracket_pos, right_bracket_pos - left_bracket_pos + 1));
+					// Bug: this used to include both brackets themselves in the substring handed
+					// to Convert::to_int32 (e.g. "[0]" instead of "0"), which std::stoi rejects as
+					// invalid, throwing every time this branch ran.
+					bracket_index = Convert::to_int32(key.substr(left_bracket_pos + 1, right_bracket_pos - left_bracket_pos - 1));
 					key_without_brackets = key.substr(0, left_bracket_pos);
 					key_has_brackets = true;
 				}
