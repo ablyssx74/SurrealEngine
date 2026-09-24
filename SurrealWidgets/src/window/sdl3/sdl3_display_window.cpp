@@ -5,6 +5,8 @@
 #include <SDL3/SDL_video.h>
 #include <SDL3/SDL_mouse.h>
 #include <cmath>
+#include <cstdlib>
+#include <cstdio>
 
 #include "surrealwidgets/core/image.h"
 
@@ -604,12 +606,18 @@ void SDL3DisplayWindow::OnJoyButtonDown(const SDL_GamepadButtonEvent& event)
 
 void SDL3DisplayWindow::OnKeyUp(const SDL_KeyboardEvent& event)
 {
-	WindowHost->OnWindowKeyUp(ScancodeToInputKey(event.scancode));
+	InputKey key = ScancodeToInputKey(event.scancode);
+	if (std::getenv("SE_DEBUG_INPUT"))
+		fprintf(stderr, "[Input] SDL3 OnKeyUp: scancode=%d (%s) -> InputKey=%d\n", (int)event.scancode, SDL_GetScancodeName(event.scancode), (int)key);
+	WindowHost->OnWindowKeyUp(key);
 }
 
 void SDL3DisplayWindow::OnKeyDown(const SDL_KeyboardEvent& event)
 {
-	WindowHost->OnWindowKeyDown(ScancodeToInputKey(event.scancode));
+	InputKey key = ScancodeToInputKey(event.scancode);
+	if (std::getenv("SE_DEBUG_INPUT"))
+		fprintf(stderr, "[Input] SDL3 OnKeyDown: scancode=%d (%s) -> InputKey=%d\n", (int)event.scancode, SDL_GetScancodeName(event.scancode), (int)key);
+	WindowHost->OnWindowKeyDown(key);
 }
 
 InputKey SDL3DisplayWindow::GetMouseButtonKey(const SDL_MouseButtonEvent& event)

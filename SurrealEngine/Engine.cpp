@@ -1,5 +1,7 @@
 
 #include "Precomp.h"
+#include <cstdlib>
+#include <cstdio>
 #include "Engine.h"
 #include "Utils/File.h"
 #include "Utils/StrTools.h"
@@ -1527,7 +1529,16 @@ void Engine::UpdateInput(float timeElapsed)
 		tickDebugger();
 
 	if (!viewport->Actor())
+	{
+		static const bool debugInput = std::getenv("SE_DEBUG_INPUT") != nullptr;
+		static bool warnedNoActor = false;
+		if (debugInput && !warnedNoActor)
+		{
+			fprintf(stderr, "[Input] UpdateInput: viewport->Actor() is null - activeInputButtons/Axes are being set but never applied to anything\n");
+			warnedNoActor = true;
+		}
 		return;
+	}
 
 	for (auto& it : activeInputButtons)
 		viewport->Actor()->SetBool(it.first, true);
@@ -1699,6 +1710,8 @@ void Engine::OnWindowKeyChar(std::string chars)
 
 void Engine::OnWindowKeyDown(EInputKey key)
 {
+	static const bool debugInput = std::getenv("SE_DEBUG_INPUT") != nullptr;
+
 	if (playingAvi)
 	{
 		if (key == EInputKey::IK_Escape)
@@ -1707,19 +1720,33 @@ void Engine::OnWindowKeyDown(EInputKey key)
 	}
 
 	if (engine->dxRootWindow && engine->dxRootWindow->OnWindowKeyDown(key))
+	{
+		if (debugInput)
+			fprintf(stderr, "[Input] Engine::OnWindowKeyDown(%d): consumed by dxRootWindow (menu/UI), never reaches InputEvent\n", (int)key);
 		return;
+	}
 
+	if (debugInput)
+		fprintf(stderr, "[Input] Engine::OnWindowKeyDown(%d): passing to InputEvent(IST_Press)\n", (int)key);
 	InputEvent(key, IST_Press);
 }
 
 void Engine::OnWindowKeyUp(EInputKey key)
 {
+	static const bool debugInput = std::getenv("SE_DEBUG_INPUT") != nullptr;
+
 	if (playingAvi)
 		return;
 
 	if (engine->dxRootWindow && engine->dxRootWindow->OnWindowKeyUp(key))
+	{
+		if (debugInput)
+			fprintf(stderr, "[Input] Engine::OnWindowKeyUp(%d): consumed by dxRootWindow (menu/UI), never reaches InputEvent\n", (int)key);
 		return;
+	}
 
+	if (debugInput)
+		fprintf(stderr, "[Input] Engine::OnWindowKeyUp(%d): passing to InputEvent(IST_Release)\n", (int)key);
 	InputEvent(key, IST_Release);
 }
 
@@ -1815,11 +1842,21 @@ void Engine::Key(std::string key)
 
 void Engine::InputEvent(EInputKey key, EInputType type, int delta)
 {
+	static const bool debugInput = std::getenv("SE_DEBUG_INPUT") != nullptr;
+
 	if (Frame::RunState != FrameRunState::Running || playingAvi)
+	{
+		if (debugInput)
+			fprintf(stderr, "[Input] InputEvent(%d): dropped, RunState=%d playingAvi=%d\n", (int)key, (int)Frame::RunState, (int)playingAvi);
 		return;
+	}
 
 	bool handled = CallEvent(console, EventName::KeyEvent, { ExpressionValue::ByteValue(key), ExpressionValue::ByteValue(type), ExpressionValue::FloatValue((float)delta) }).ToBool();
-	
+
+	if (debugInput)
+		fprintf(stderr, "[Input] InputEvent(%d, type=%d): console.KeyEvent handled=%d, binding=\"%s\"\n",
+			(int)key, (int)type, (int)handled, (key >= 0 && key < 256) ? keybindings[keynames[key]].c_str() : "(out of range)");
+
 	if (!handled)
 	{
 		if ((type == EInputType::IST_Press || type == EInputType::IST_Axis) && key >= 0 && key < 256)
@@ -1943,6 +1980,8 @@ bool Engine::ExecCommand(const Array<std::string>& args)
 
 void Engine::InputCommand(const std::string& commands, EInputKey key, int delta)
 {
+	static const bool debugInput = std::getenv("SE_DEBUG_INPUT") != nullptr;
+
 	for (const std::string& commandline : GetSubcommands(commands))
 	{
 		Array<std::string> args = GetArgs(commandline);
@@ -1954,6 +1993,9 @@ void Engine::InputCommand(const std::string& commands, EInputKey key, int delta)
 			if (command == "button" && args.size() == 2)
 			{
 				activeInputButtons[args[1]] = key;
+				if (debugInput)
+					fprintf(stderr, "[Input] InputCommand: activeInputButtons[\"%s\"] = key %d (viewport->Actor()=%p)\n",
+						args[1].c_str(), (int)key, (void*)(viewport ? viewport->Actor() : nullptr));
 			}
 			else if (command == "axis" && args.size() == 3)
 			{
@@ -1961,9 +2003,14 @@ void Engine::InputCommand(const std::string& commands, EInputKey key, int delta)
 				if (args[2].size() > 6 && args[2].substr(0, 6) == "Speed=")
 					speed = (float)std::atof(args[2].substr(6).c_str());
 				activeInputAxes[args[1]] = { speed * delta, key };
+				if (debugInput)
+					fprintf(stderr, "[Input] InputCommand: activeInputAxes[\"%s\"] = {value=%f, key=%d} (viewport->Actor()=%p)\n",
+						args[1].c_str(), speed * delta, (int)key, (void*)(viewport ? viewport->Actor() : nullptr));
 			}
 			else
 			{
+				if (debugInput)
+					fprintf(stderr, "[Input] InputCommand: ExecCommand(\"%s\")\n", commandline.c_str());
 				ExecCommand(args);
 			}
 		}
