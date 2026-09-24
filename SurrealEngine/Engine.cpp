@@ -1493,10 +1493,15 @@ void Engine::LoadKeybindings()
 		keybindings[keyname] = packages->GetIniValue("user", "Engine.Input", keyname);
 	}
 
-	for (int i = 0; i < 40; i++)
+	// Bug: this used to build a literal "Aliases[N]" string and pass it as the whole key name to
+	// GetIniValue, which only matches a key hashed from that exact bracketed string. On-disk
+	// "Aliases[N]=..." lines are actually stored as index N of a bare "Aliases" key (see the
+	// bracket-splitting done when ini files are parsed/loaded), so this never matched anything and
+	// inputAliases stayed permanently empty - meaning every stock alias-style binding (MoveForward,
+	// MoveBackward, StrafeLeft, StrafeRight, AltFire, etc.) silently failed to expand into its real
+	// Axis/Button command and fell through to ExecCommand() looking for a nonexistent Exec function.
+	for (const std::string& alias : packages->GetIniValues("user", "Engine.Input", "Aliases"))
 	{
-		std::string alias = packages->GetIniValue("user", "Engine.Input", "Aliases[" + std::to_string(i) + "]");
-
 		// Total trash parsing, but it will do for the aliases I have! Feel free to improve it!
 		std::string commandStart = "(Command=\"";
 		std::string commandSplit = "\",Alias=";
@@ -1516,6 +1521,13 @@ void Engine::LoadKeybindings()
 				}
 			}
 		}
+	}
+
+	if (std::getenv("SE_DEBUG_INPUT"))
+	{
+		fprintf(stderr, "[Input] LoadKeybindings: loaded %d input alias(es)\n", (int)inputAliases.size());
+		for (auto& it : inputAliases)
+			fprintf(stderr, "[Input] LoadKeybindings:   alias \"%s\" -> \"%s\"\n", it.first.c_str(), it.second.c_str());
 	}
 }
 
