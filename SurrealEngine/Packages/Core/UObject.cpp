@@ -129,6 +129,15 @@ void UObject::Load(ObjectStream* stream)
 			SetName("Name", Name);
 			SetInt("ObjectFlags", (int)Flags);
 		}
+
+		// PerObjectConfig objects (e.g. UBrowserAll, a package export object rather than something
+		// spawned at runtime) need their config properties loaded from their own per-instance ini
+		// section after the serialized package data is loaded - see UClass::LoadProperties. This
+		// never ran for package-export objects before, so a PerObjectConfig object's config
+		// properties (e.g. UBrowserAll's ListFactories) always kept whatever was baked into the
+		// package at compile time, no matter what the ini said.
+		if (Class && (Class->ClsFlags & ClassFlags::PerObjectConfig))
+			Class->LoadProperties(&PropertyData, this);
 	}
 }
 
@@ -244,8 +253,9 @@ void UObject::SetPropertyFromString(const NameString& name, const std::string& v
 
 void UObject::SaveConfig()
 {
-	// Saves the instance properties the ini file
-	Class->SaveProperties(&PropertyData);
+	// Saves the instance properties the ini file. Pass `this` so PerObjectConfig classes save
+	// under their own object name rather than Package.ClassName - see UClass::SaveProperties.
+	Class->SaveProperties(&PropertyData, this);
 }
 
 uint8_t UObject::GetByte(const NameString& name) const

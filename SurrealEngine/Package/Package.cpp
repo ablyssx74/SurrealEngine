@@ -96,6 +96,15 @@ UObject* Package::NewObject(const NameString& objname, UClass* objclass, ObjectF
 				obj->SetObject("Class", obj->Class);
 				obj->SetName("Name", obj->Name);
 				obj->SetInt("ObjectFlags", (int)obj->Flags);
+
+				// PerObjectConfig classes (e.g. UBrowserAll/UBrowserUT/UBrowserLAN) need their
+				// config properties loaded from their own per-instance ini section right after
+				// construction - nothing else in the engine ever did this for runtime-constructed
+				// objects (only class default objects got LoadProperties() called on them, in
+				// UClass::Load()), so a freshly `new`'d PerObjectConfig object previously always
+				// kept its class defaults (e.g. an empty ListFactories) no matter what the ini said.
+				if (objclass->ClsFlags & ClassFlags::PerObjectConfig)
+					objclass->LoadProperties(&obj->PropertyData, obj);
 			}
 			return obj;
 		}

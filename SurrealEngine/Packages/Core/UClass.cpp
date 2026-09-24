@@ -289,14 +289,24 @@ namespace
 	// actually read those values into its own memory.
 	void LoadConfigArrayProperty(PackageManager* pm, const NameString& configName, const NameString& sectionName, const NameString& name, UArrayProperty* arrayprop, void* ptr)
 	{
+		static const bool debugConfig = std::getenv("SE_DEBUG_CONFIG") != nullptr;
+
 		if (!arrayprop->Inner)
+		{
+			if (debugConfig)
+				fprintf(stderr, "[Config] LoadConfigArrayProperty: [%s] %s has no Inner element type, skipped\n", sectionName.ToString().c_str(), name.ToString().c_str());
 			return;
+		}
 
 		Array<std::string> values = pm->GetIniValues(configName, sectionName, name);
+		if (debugConfig)
+			fprintf(stderr, "[Config] LoadConfigArrayProperty: [%s] %s -> %d ini value(s) found\n", sectionName.ToString().c_str(), name.ToString().c_str(), (int)values.size());
 		if (values.empty())
 			return;
 
 		ScriptArray* arr = static_cast<ScriptArray*>(ptr);
+		if (debugConfig)
+			fprintf(stderr, "[Config] LoadConfigArrayProperty: [%s] %s populated with %d element(s)\n", sectionName.ToString().c_str(), name.ToString().c_str(), (int)values.size());
 		arr->Resize(values.size());
 		for (size_t i = 0; i < values.size(); i++)
 			LoadConfigArrayElement(pm, arrayprop->Inner, arr->GetItem(i), values[i]);
@@ -340,11 +350,27 @@ namespace
 	}
 }
 
-void UClass::LoadProperties(PropertyDataBlock* propertyBlock)
+void UClass::LoadProperties(PropertyDataBlock* propertyBlock, UObject* instance)
 {
-	NameString sectionName = package->GetPackageName().ToString() + "." + Name.ToString();
+	// PerObjectConfig classes (e.g. UBrowserAll/UBrowserUT/UBrowserLAN, all instances of the same
+	// browser-list class, each holding its own ListFactories) store their config under a section
+	// named after the OBJECT instance, not Package.ClassName - confirmed from a real UT99
+	// UnrealTournament.ini, which has a bare "[UBrowserAll]" section, not "[UBrowser.UBrowserAll]".
+	// Package::NewObject() never used to load config into newly constructed instances at all
+	// (it only copied class defaults), so this path previously never ran for these objects -
+	// this was the actual reason ListFactories always loaded empty regardless of the dynamic-array
+	// property support added above: the section name computed below was simply never the one the
+	// real per-object ini values live under.
+	static const bool debugConfig = std::getenv("SE_DEBUG_CONFIG") != nullptr;
+	bool perObjectConfig = instance && (ClsFlags & ClassFlags::PerObjectConfig);
+	NameString sectionName = perObjectConfig ? instance->Name : NameString(package->GetPackageName().ToString() + "." + Name.ToString());
 	NameString configName = ClassConfigName;
 	if (configName.IsNone()) configName = "system";
+	if (debugConfig && instance)
+	{
+		fprintf(stderr, "[Config] LoadProperties() called on instance %s of class %s (PerObjectConfig %s, section [%s])\n",
+			instance->Name.ToString().c_str(), Name.ToString().c_str(), perObjectConfig ? "set" : "NOT set", sectionName.ToString().c_str());
+	}
 	for (UProperty* prop : Properties)
 	{
 		if (AnyFlags(prop->PropFlags, PropertyFlags::Config | PropertyFlags::GlobalConfig | PropertyFlags::Localized))
@@ -528,7 +554,7 @@ void UClass::LoadProperties(PropertyDataBlock* propertyBlock)
 	}
 }
 
-void UClass::SaveProperties(PropertyDataBlock* propertyBlock)
+void UClass::SaveProperties(PropertyDataBlock* propertyBlock, UObject* instance)
 {
 	// Diagnostic: set SE_DEBUG_CONFIG=1 to trace every SaveProperties() call and whether it's
 	// actually allowed to write anything - a class whose ClassFlags don't include Config never
@@ -546,7 +572,10 @@ void UClass::SaveProperties(PropertyDataBlock* propertyBlock)
 	if (!(ClsFlags & ClassFlags::Config))
 		return;
 
-	NameString sectionName = package->GetPackageName().ToString() + "." + Name.ToString();
+	// See LoadProperties() for why PerObjectConfig instances (UBrowserAll and siblings) need the
+	// section name to be their own bare object Name rather than Package.ClassName.
+	bool perObjectConfig = instance && (ClsFlags & ClassFlags::PerObjectConfig);
+	NameString sectionName = perObjectConfig ? instance->Name : NameString(package->GetPackageName().ToString() + "." + Name.ToString());
 	NameString configName = ClassConfigName;
 	if (configName.IsNone()) configName = "system";
 
