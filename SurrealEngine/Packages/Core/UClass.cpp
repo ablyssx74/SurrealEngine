@@ -370,6 +370,19 @@ void UClass::LoadProperties(PropertyDataBlock* propertyBlock, UObject* instance)
 	{
 		fprintf(stderr, "[Config] LoadProperties() called on instance %s of class %s (PerObjectConfig %s, section [%s])\n",
 			instance->Name.ToString().c_str(), Name.ToString().c_str(), perObjectConfig ? "set" : "NOT set", sectionName.ToString().c_str());
+		// Dump every property this class actually has, to check whether ListFactories (or
+		// whatever holds the master server factory list) is even present here, and if so whether
+		// it's flagged Config/GlobalConfig - if it's missing from this dump entirely, ListFactories
+		// must live on a different object than the one named "UBrowserAll" that LoadProperties()
+		// is being called on here.
+		for (UProperty* p : Properties)
+		{
+			fprintf(stderr, "[Config]   property %s (array=%s, Config=%s, GlobalConfig=%s)\n",
+				p->Name.ToString().c_str(),
+				UObject::TryCast<UArrayProperty>(p) ? "yes" : "no",
+				AnyFlags(p->PropFlags, PropertyFlags::Config) ? "yes" : "no",
+				AnyFlags(p->PropFlags, PropertyFlags::GlobalConfig) ? "yes" : "no");
+		}
 	}
 	for (UProperty* prop : Properties)
 	{
