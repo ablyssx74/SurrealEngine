@@ -1450,19 +1450,15 @@ void GLRenderDevice::DrawComplexSurface(SceneNode* Frame, SurfaceInfo& Surface, 
 #ifdef __HAIKU__
 	else
 	{
-		// Sampling a real (non-nulltex) base texture on world surfaces renders solid black on
-		// this platform's Zink/NVK driver - a bug we've been unable to root-cause despite
-		// confirming the uploaded texture data itself is correct, the binding/draw pipeline is
-		// correct, mip completeness, a real shader stage interface mismatch, automatic LOD
-		// selection, and mutable-vs-immutable texture storage. As a stopgap, substitute the
-		// known-good nulltex (proven to sample correctly) and tint it with the real texture's
-		// own average color instead, so world surfaces at least show approximately the right
-		// color and correct lighting instead of solid black. This loses all texture detail and
-		// pattern - not a real fix, just makes the game visually playable in the meantime.
-		// Set SE_DISABLE_TEXTURE_WORKAROUND=1 to fall back to real (currently black) sampling,
-		// e.g. to re-test whether a future driver update has fixed the underlying bug.
-		static const bool disableWorkaround = std::getenv("SE_DISABLE_TEXTURE_WORKAROUND") != nullptr;
-		if (!disableWorkaround)
+		// Was a permanent workaround for world surfaces sampling as solid black on Haiku -
+		// root-caused and fixed (see GLUploadManager::ShouldForceSingleMipLevel): any
+		// mipmap-complete texture with more than one level sampled as black here, reproduced
+		// identically on both Zink/NVK and Haiku's stock software Mesa, so every texture is now
+		// forced to a single mip level on this platform, which restores real texture sampling.
+		// Kept as a manual fallback (substitute nulltex + the real texture's average color) in
+		// case some other case still needs it - set SE_FORCE_FLATCOLOR_WORKAROUND=1.
+		static const bool forceWorkaround = std::getenv("SE_FORCE_FLATCOLOR_WORKAROUND") != nullptr;
+		if (forceWorkaround)
 		{
 			info.texcolor = vec4(info.tex->AverageColorR, info.tex->AverageColorG, info.tex->AverageColorB, 1.0f);
 			info.tex = nulltex;

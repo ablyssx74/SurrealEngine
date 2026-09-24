@@ -13,6 +13,31 @@ GLUploadManager::~GLUploadManager()
 {
 }
 
+// Root-caused and confirmed on real hardware: any texture that ends up mipmap-complete with
+// more than one level reliably samples as solid black on Haiku, reproduced identically on both
+// Zink/NVK (hardware Vulkan translation) and Haiku's own stock Mesa/llvmpipe software
+// rasterizer - two unrelated renderer implementations agreeing rules out a driver-specific
+// quirk, so this is something about how multi-level textures get built here running into
+// completeness rules Haiku's Mesa builds enforce (GLSL texture completeness applies to the
+// *whole* declared mip chain, even for an explicit textureLod() call at level 0 - which is why
+// forcing LOD 0 never escaped this). Forcing every texture down to a single mip level sidesteps
+// it entirely and restores full texture detail; the only cost is losing mipmap-based
+// minification filtering (more shimmer/aliasing on distant/oblique surfaces), a clear win over
+// textures not rendering at all. Set SE_DISABLE_MIPMAP_WORKAROUND=1 to re-enable real mipmapping
+// on Haiku, e.g. to re-test whether a future Mesa update fixed the underlying completeness bug.
+static bool ShouldForceSingleMipLevel()
+{
+#ifdef __HAIKU__
+	static const bool disableWorkaround = std::getenv("SE_DISABLE_MIPMAP_WORKAROUND") != nullptr;
+	if (!disableWorkaround)
+		return true;
+#endif
+	// Diagnostic escape hatch: set SE_DEBUG_NO_MIPMAPS=1 to force every texture to a single
+	// mip level, no matter how many levels its source data has, on any platform.
+	static const bool debugNoMipmaps = std::getenv("SE_DEBUG_NO_MIPMAPS") != nullptr;
+	return debugNoMipmaps;
+}
+
 bool GLUploadManager::SupportsTextureFormat(TextureFormat Format) const
 {
 	return GLTextureUploader::GetUploader(Format);
@@ -24,13 +49,7 @@ void GLUploadManager::UploadTexture(GLCachedTexture* tex, const TextureInfo& Inf
 	int height = Info.VSize;
 	int mipcount = Info.NumMips;
 
-	// Diagnostic escape hatch: set SE_DEBUG_NO_MIPMAPS=1 to force every texture to a single
-	// mip level, no matter how many levels its source data has. All our sampler objects use
-	// mipmap-requiring min filters (*_MIPMAP_*), so an incomplete mip chain on some texture
-	// (only some levels actually written, e.g. because Mips[level].Data is empty) would make
-	// that texture sample as black on a strict/core-profile driver. This rules that out.
-	static const bool debugNoMipmaps = std::getenv("SE_DEBUG_NO_MIPMAPS") != nullptr;
-	if (debugNoMipmaps)
+	if (ShouldForceSingleMipLevel())
 		mipcount = 1;
 
 	GLTextureUploader* uploader = GLTextureUploader::GetUploader(Info.Format);
@@ -168,8 +187,7 @@ void GLUploadManager::UploadTextureRect(GLCachedTexture* tex, const TextureInfo&
 
 void GLUploadManager::UploadData(GLTexture2D* image, const TextureInfo& Info, bool masked, GLTextureUploader* uploader, int dummyMipmapCount, int minSize)
 {
-	static const bool debugNoMipmaps = std::getenv("SE_DEBUG_NO_MIPMAPS") != nullptr;
-	int numMips = debugNoMipmaps ? 1 : Info.NumMips;
+	int numMips = ShouldForceSingleMipLevel() ? 1 : Info.NumMips;
 
 	// UploadTexture() allocates storage (glTexImage2D) for every level up to its own mipcount
 	// and sets GL_TEXTURE_MAX_LEVEL to match, on the assumption every one of those levels gets
