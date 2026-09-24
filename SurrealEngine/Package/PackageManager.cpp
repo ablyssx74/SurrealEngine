@@ -938,11 +938,23 @@ void PackageManager::UpdateDeadMasterServerAddresses()
 	// rather than only fixing an existing-but-dead configuration.
 	if (GetIniValues("System", "UBrowserAll", "ListFactories").empty())
 	{
+		// This list mirrors what a current community-patched UnrealTournament.ini ships (more
+		// candidates = better odds at least one master server actually answers, plus a plain HTTP
+		// server-list fallback that doesn't depend on the old GameSpy TCP protocol at all).
 		SetIniValues("System", "UBrowserAll", "ListFactories",
 			{
-				"UBrowser.UBrowserGSpyFact,MasterServerAddress=master.oldunreal.com,MasterServerTCPPort=28900,Region=0,GameName=ut",
 				"UBrowser.UBrowserGSpyFact,MasterServerAddress=master.333networks.com,MasterServerTCPPort=28900,Region=0,GameName=ut",
+				"UBrowser.UBrowserGSpyFact,MasterServerAddress=master.oldunreal.com,MasterServerTCPPort=28900,Region=0,GameName=ut",
+				"UBrowser.UBrowserGSpyFact,MasterServerAddress=master.errorist.eu,MasterServerTCPPort=28900,Region=0,GameName=ut",
+				"UBrowser.UBrowserGSpyFact,MasterServerAddress=master.noccer.de,MasterServerTCPPort=28900,Region=0,GameName=ut",
 				"UBrowser.UBrowserGSpyFact,MasterServerAddress=master.openspy.net,MasterServerTCPPort=28900,Region=0,GameName=ut",
+				"UBrowser.UBrowserGSpyFact,MasterServerAddress=master.hypercoop.tk,MasterServerTCPPort=28900,Region=0,GameName=ut",
+				"UBrowser.UBrowserHTTPFact,MasterServerAddress=lists.gameserverlister.com,MasterServerTCPPort=80,MasterServerURI=/ut-servers-pc.txt",
+				"UBrowser.UBrowserGSpyFact,MasterServerAddress=master.newbiesplayground.net,MasterServerTCPPort=28900,Region=0,GameName=ut",
+				"UBrowser.UBrowserGSpyFact,MasterServerAddress=master.frag-net.com,MasterServerTCPPort=28900,Region=0,GameName=ut",
+				"UBrowser.UBrowserGSpyFact,MasterServerAddress=master-au.unrealarchive.org,MasterServerTCPPort=28900,Region=0,GameName=ut",
+				"UBrowser.UBrowserGSpyFact,MasterServerAddress=master2.qtracker.com,MasterServerTCPPort=28900,Region=0,GameName=ut",
+				"UBrowser.UBrowserGSpyFact,MasterServerAddress=medor.no-ip.org,MasterServerTCPPort=28900,Region=0,GameName=ut",
 			}, true);
 		// bHidden: this section is an aggregation source other tabs subset from, not a tab of its
 		// own. bFallbackFactories: try the next ListFactories entry if one master server doesn't
