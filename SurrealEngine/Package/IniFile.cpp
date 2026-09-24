@@ -51,21 +51,29 @@ IniFile::IniFile(const std::string& filename)
 
 				if (!name.empty())
 				{
+					// Bug: this was disabled ("This doesn't work"), so every "Key[N]=value" line
+					// from a real ini file was stored as a whole separate key literally named
+					// "Key[N]" (single value, unindexed) instead of index N of a shared bare "Key".
+					// GetValue(s)("Key", ..., index) - and every fixed-size array config property
+					// that reads through it - could then never find data that only exists on disk
+					// in this indexed format, even though UpdateFile()'s merge-writer below already
+					// re-derives the same bracket/index split correctly on its own for the opposite
+					// (write) direction. A property populated purely in-memory at runtime (e.g. via
+					// SetValues()) was unaffected, which is why ListFactories worked while
+					// ServerListNames - which only ever exists as stock ini data - did not.
 					int index = -1;
 					bool indexed = false;
-					/* This doesn't work
 					size_t bracket = name.find('[');
 					if (bracket != std::string::npos)
 					{
 						size_t rightBracket = name.find(']');
-						if (rightBracket == std::string::npos)
-							Exception::Throw("malformed INI array index");
-
-						indexed = true;
-						index = Convert::to_int32(name.substr(bracket + 1, rightBracket - bracket - 1));
-						name = name.substr(0, bracket);
+						if (rightBracket != std::string::npos && rightBracket > bracket)
+						{
+							indexed = true;
+							index = Convert::to_int32(name.substr(bracket + 1, rightBracket - bracket - 1));
+							name = name.substr(0, bracket);
+						}
 					}
-					*/
 
 					IniSection& section = AddUniqueSection(sectionName);
 					section.SetValue(name, value, index, indexed);
