@@ -165,11 +165,12 @@
 
 
 FILE *gLogFile{stderr};
-#ifdef _DEBUG
-LogLevel gLogLevel{LogLevel::Warning};
-#else
+// Default to Error regardless of build config - Warning-level messages include things that are
+// routinely expected and harmless (e.g. a fallback backend that doesn't support every device
+// type failing to fully initialize, or no capture-capable backend being available at all on a
+// platform that doesn't have one), not actual problems worth surfacing on every launch. Still
+// fully overridable via the ALSOFT_LOGLEVEL environment variable below for real diagnostics.
 LogLevel gLogLevel{LogLevel::Error};
-#endif
 
 /************************************************
  * Library initialization
