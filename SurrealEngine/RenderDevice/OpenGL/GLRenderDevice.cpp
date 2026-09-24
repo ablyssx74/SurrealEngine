@@ -1612,6 +1612,38 @@ void GLRenderDevice::DrawComplexSurfaceFaces(const ComplexSurfaceInfo& info)
 	float DetailUMult = info.fogmap == nulltex ? info.detailtex->UMult : info.fogmap->UMult;
 	float DetailVMult = info.fogmap == nulltex ? info.detailtex->VMult : info.fogmap->VMult;
 
+	// Diagnostic escape hatch: set SE_DEBUG_PRINT_TEXCOORD=1 to print the base texture's Pan/Mult
+	// values and the first vertex's raw computed s/t for the first several world surfaces to
+	// stderr, flagging NaN/Infinity explicitly. SE_DEBUG_SHOW_BASETEX has now been proven black
+	// on two completely unrelated renderer backends (Zink/NVK hardware and llvmpipe software),
+	// ruling out any GPU driver as the cause - the bug has to be in our own computed data.
+	// SE_DEBUG_WRAP_TEXCOORD's floor()-based wrap didn't help either, which is consistent with
+	// (not just coincidence): floor(NaN)=NaN and floor(Inf)=Inf, so a NaN/Infinity texcoord would
+	// survive that "wrap" unchanged - if UMult/VMult end up Inf/NaN (e.g. from a zero UScale or
+	// USize feeding UMult = 1.0f/(uscale*USize)), sampling with a NaN/Inf coordinate is undefined
+	// behavior and reads back as black on most implementations. This test looks at the actual
+	// numbers directly instead of inferring from another visual result.
+	static const bool debugPrintTexCoord = std::getenv("SE_DEBUG_PRINT_TEXCOORD") != nullptr;
+	static int debugPrintTexCoordCount = 0;
+	if (debugPrintTexCoord && debugPrintTexCoordCount < 20)
+	{
+		debugPrintTexCoordCount++;
+		bool bad = !std::isfinite(UMult) || !std::isfinite(VMult) || !std::isfinite(UPan) || !std::isfinite(VPan);
+		fprintf(stderr, "[TexCoord] UPan=%f VPan=%f UMult=%f VMult=%f UScale=%f VScale=%f%s\n",
+			UPan, VPan, UMult, VMult, info.tex->UScale, info.tex->VScale,
+			bad ? "  <-- NON-FINITE" : "");
+		if (info.facet->VertexCount > 0)
+		{
+			vec3 p0 = info.facet->Vertices[0];
+			float u0 = dot(xaxis, p0);
+			float v0 = dot(yaxis, p0);
+			float s0 = (u0 - UPan) * UMult;
+			float t0 = (v0 - VPan) * VMult;
+			fprintf(stderr, "[TexCoord]   vertex0 u=%f v=%f -> s=%f t=%f%s\n",
+				u0, v0, s0, t0, (!std::isfinite(s0) || !std::isfinite(t0)) ? "  <-- NON-FINITE" : "");
+		}
+	}
+
 	vec4 color = info.editorcolor ? *info.editorcolor : vec4(1.0f);
 	color *= info.texcolor;
 
