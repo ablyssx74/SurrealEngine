@@ -39,7 +39,13 @@ void UInternetLink::Tick(float elapsed)
 		ResolveStatus = 0;
 	lock.unlock();
 
-	if (ResolveStatus == 2)
+	// Bug: ResolveStatus (the member) was already reset to 0 above based on resolveStatus (the
+	// local snapshot) - checking the member here instead of the local meant this could never be
+	// true, so Resolved/ResolveFailed never fired for any DNS resolution at all. That's the
+	// actual missing link behind "DNS resolves fine but the game never proceeds to open a
+	// connection" - script code waiting on the Resolved event to know when to call Open() was
+	// waiting on an event that could never come.
+	if (resolveStatus == 2)
 	{
 		UFunction* func = FindEventFunction(this, "Resolved");
 		if (func)
@@ -49,7 +55,7 @@ void UInternetLink::Tick(float elapsed)
 			CallEvent(this, EventName::Resolved, { ExpressionValue::Variable(&resolvedAddr, &prop) });
 		}
 	}
-	else if (ResolveStatus == 3)
+	else if (resolveStatus == 3)
 	{
 		CallEvent(this, EventName::ResolveFailed);
 	}
