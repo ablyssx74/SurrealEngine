@@ -80,6 +80,22 @@ void UInternetLink::Resolve(const std::string& Domain)
 	// silently sends every resolved connection attempt at the wrong port.
 	static const bool debugNet = std::getenv("SE_DEBUG_NET") != nullptr;
 
+	// UT99's original master servers have all been offline for years (see
+	// PackageManager::UpdateDeadMasterServerAddresses, which patches these same addresses out of
+	// the ini wherever they're configured). That patch alone turned out not to be enough here:
+	// this exact hostname is still what gets passed in to resolve, meaning whatever UnrealScript
+	// logic is calling Resolve() isn't actually sourcing it from the ini the way that patch
+	// assumed (quite possibly a hardcoded class default baked into the compiled package, which no
+	// ini edit could ever reach). Resolve() is the one place every master-server DNS lookup
+	// actually goes through in this engine, regardless of where the hostname string originated,
+	// so substituting here is guaranteed to take effect no matter what upstream logic produced it.
+	static const std::pair<std::string, std::string> deadServerReplacements[] =
+	{
+		{ "unreal.epicgames.com", "master.oldunreal.com" },
+		{ "master0.gamespy.com", "master.333networks.com" },
+		{ "master.mplayer.com", "master.openspy.net" },
+	};
+
 	std::unique_lock<std::mutex> lock(Mutex);
 	if (ResolveStatus != 1)
 	{
@@ -89,6 +105,16 @@ void UInternetLink::Resolve(const std::string& Domain)
 			Thread.detach();
 
 		std::string _address = Domain;
+		for (const auto& replacement : deadServerReplacements)
+		{
+			if (_address == replacement.first)
+			{
+				if (debugNet)
+					fprintf(stderr, "[Net] Resolve(): substituting dead master server \"%s\" -> \"%s\"\n", _address.c_str(), replacement.second.c_str());
+				_address = replacement.second;
+				break;
+			}
+		}
 		auto threadMain = [this, _address, debugNet]()
 			{
 				if (debugNet)
