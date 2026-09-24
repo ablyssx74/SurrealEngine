@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cstdlib>
+#include <cerrno>
 
 #ifdef WIN32
 #include <WinSock2.h>
@@ -102,28 +103,48 @@ void UUdpLink::Tick(float elapsed)
 
 int UUdpLink::BindPort(int Port, bool bUseNextAvailable)
 {
-	sockaddr_in addr;
-	memset(&addr, 0, sizeof(sockaddr_in));
-	addr.sin_addr.s_addr = INADDR_ANY;
-	addr.sin_port = htons(Port);
+	// See the matching bug/fix note in UTcpLink::BindPort() - bUseNextAvailable was never actually
+	// used, so a single EADDRINUSE (e.g. multiple links wanting the same starting port at once)
+	// just gave up instead of trying successive ports. Also restores sin_family = AF_INET, which
+	// was missing here entirely - bind() on an AF_INET socket with an unset (zeroed) family can
+	// fail outright on some platforms, silently, before bUseNextAvailable would even matter.
+	const int maxAttempts = (bUseNextAvailable && Port != 0) ? 20 : 1;
+	for (int attempt = 0; attempt < maxAttempts; attempt++)
+	{
+		sockaddr_in addr;
+		memset(&addr, 0, sizeof(sockaddr_in));
+		addr.sin_family = AF_INET;
+		addr.sin_addr.s_addr = INADDR_ANY;
+		addr.sin_port = htons(Port + attempt);
 
-	int result = bind(handle, (const sockaddr*)&addr, sizeof(sockaddr_in));
-	if (result == -1)
-		return 0;
+		int result = bind(handle, (const sockaddr*)&addr, sizeof(sockaddr_in));
+		if (result == -1)
+		{
+			if (DebugNet())
+				fprintf(stderr, "[Net] UdpLink.BindPort(%d) failed (errno=%d), %s\n", Port + attempt, errno,
+					attempt + 1 < maxAttempts ? "trying next port" : "giving up");
+			continue;
+		}
 
 #ifdef WIN32
-	int size = sizeof(sockaddr_in);
+		int size = sizeof(sockaddr_in);
 #else
-	socklen_t size = sizeof(sockaddr_in);
+		socklen_t size = sizeof(sockaddr_in);
 #endif
-	result = getsockname(handle, (sockaddr*)&addr, &size);
-	if (result == -1)
-		return 0;
+		result = getsockname(handle, (sockaddr*)&addr, &size);
+		if (result == -1)
+			return 0;
 
-	LocalIP.Addr = addr.sin_addr.s_addr;
-	LocalIP.Port = addr.sin_port;
+		LocalIP.Addr = addr.sin_addr.s_addr;
+		LocalIP.Port = addr.sin_port;
 
-	return ntohs(addr.sin_port);
+		if (DebugNet())
+			fprintf(stderr, "[Net] UdpLink.BindPort: bound to port %d\n", ntohs(addr.sin_port));
+
+		return ntohs(addr.sin_port);
+	}
+
+	return 0;
 }
 
 int UUdpLink::ReadBinary(IpAddr& Addr, int Count, uint8_t& B)

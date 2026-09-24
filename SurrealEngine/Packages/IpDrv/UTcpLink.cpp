@@ -216,26 +216,48 @@ int UTcpLink::BindPort(int Port, bool bUseNextAvailable)
 	if (handle == invalid_socket_value)
 		return 0;
 
-	sockaddr_in addr;
-	memset(&addr, 0, sizeof(sockaddr_in));
-	addr.sin_family = AF_INET;
-	addr.sin_addr.s_addr = INADDR_ANY;
-	addr.sin_port = htons(Port);
+	// Bug: bUseNextAvailable was accepted but never actually used - a single failed bind() (e.g.
+	// EADDRINUSE because an earlier link on the same port is still open) just gave up. Real UT99
+	// script code relies on this to hand out a different local port to each simultaneously-open
+	// link that wants the same starting port (e.g. one UBrowserGSpyLink per configured master
+	// server, all requesting the same port) - confirmed via SE-Log-LastRun.txt showing the first
+	// GSpyLink bind succeeding and every subsequent one failing with "Error binding local port,
+	// aborting." at the exact same port. Port 0 means "OS picks any free port", which practically
+	// never fails, so retrying only makes sense for an explicit nonzero port.
+	const int maxAttempts = (bUseNextAvailable && Port != 0) ? 20 : 1;
+	for (int attempt = 0; attempt < maxAttempts; attempt++)
+	{
+		sockaddr_in addr;
+		memset(&addr, 0, sizeof(sockaddr_in));
+		addr.sin_family = AF_INET;
+		addr.sin_addr.s_addr = INADDR_ANY;
+		addr.sin_port = htons(Port + attempt);
 
-	int result = bind(handle, (const sockaddr*)&addr, sizeof(sockaddr_in));
-	if (result == -1)
-		return 0;
+		int result = bind(handle, (const sockaddr*)&addr, sizeof(sockaddr_in));
+		if (result == -1)
+		{
+			if (DebugNet())
+				fprintf(stderr, "[Net] TcpLink.BindPort(%d) failed (errno=%d), %s\n", Port + attempt, errno,
+					attempt + 1 < maxAttempts ? "trying next port" : "giving up");
+			continue;
+		}
 
 #ifdef WIN32
-	int size = sizeof(sockaddr_in);
+		int size = sizeof(sockaddr_in);
 #else
-	socklen_t size = sizeof(sockaddr_in);
+		socklen_t size = sizeof(sockaddr_in);
 #endif
-	result = getsockname(handle, (sockaddr*)&addr, &size);
-	if (result == -1)
-		return 0;
+		result = getsockname(handle, (sockaddr*)&addr, &size);
+		if (result == -1)
+			return 0;
 
-	return ntohs(addr.sin_port);
+		if (DebugNet())
+			fprintf(stderr, "[Net] TcpLink.BindPort: bound to port %d\n", ntohs(addr.sin_port));
+
+		return ntohs(addr.sin_port);
+	}
+
+	return 0;
 }
 
 bool UTcpLink::Listen()
