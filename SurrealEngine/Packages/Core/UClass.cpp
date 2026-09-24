@@ -11,6 +11,7 @@
 #include "Properties/UBoolProperty.h"
 #include "Properties/UByteProperty.h"
 #include "Properties/UFloatProperty.h"
+#include "Properties/UArrayProperty.h"
 #include "VM/Bytecode.h"
 #include "VM/NativeFunc.h"
 #include "VM/ScriptCall.h"
@@ -216,6 +217,129 @@ void UClass::SaveConfig()
 	SaveProperties(&PropertyData);
 }
 
+namespace
+{
+	// Assigns a single dynamic-array element's value from its ini string representation, mirroring
+	// the per-type dispatch UClass::LoadProperties() already uses for scalar and fixed-size array
+	// config properties. Class-typed elements are resolved via the given PackageManager the same
+	// way UClassProperty is handled elsewhere in this file.
+	void LoadConfigArrayElement(PackageManager* pm, UProperty* elementProp, void* ptr, const std::string& value)
+	{
+		if (auto byteprop = UObject::TryCast<UByteProperty>(elementProp))
+		{
+			if (!value.empty() && value.front() >= '0' && value.front() <= '9')
+			{
+				*static_cast<uint8_t*>(ptr) = (uint8_t)std::atoi(value.c_str());
+			}
+			else if (byteprop->EnumType)
+			{
+				int index = 0;
+				for (const NameString& elementName : byteprop->EnumType->ElementNames)
+				{
+					if (elementName == value)
+					{
+						*static_cast<uint8_t*>(ptr) = (uint8_t)index;
+						break;
+					}
+					index++;
+				}
+			}
+		}
+		else if (UObject::IsType<UIntProperty>(elementProp)) *static_cast<int32_t*>(ptr) = (int32_t)std::atoi(value.c_str());
+		else if (UObject::IsType<UFloatProperty>(elementProp)) *static_cast<float*>(ptr) = (float)std::atof(value.c_str());
+		else if (UObject::IsType<UNameProperty>(elementProp)) *static_cast<NameString*>(ptr) = value;
+		else if (UObject::IsType<UStrProperty>(elementProp)) *static_cast<std::string*>(ptr) = value;
+		else if (UObject::IsType<UStringProperty>(elementProp)) *static_cast<std::string*>(ptr) = value;
+		else if (auto boolprop = UObject::TryCast<UBoolProperty>(elementProp))
+		{
+			std::string lower = value;
+			for (char& c : lower)
+				if (c >= 'A' && c <= 'Z')
+					c += 'a' - 'A';
+			boolprop->SetBool(ptr, lower == "1" || lower == "true" || lower == "yes");
+		}
+		else if (UObject::IsType<UClassProperty>(elementProp))
+		{
+			try
+			{
+				size_t pos = value.find_first_of('.');
+				if (pos != std::string::npos)
+				{
+					NameString packageName = value.substr(0, pos);
+					NameString className = value.substr(pos + 1);
+					Package* pkg = pm->GetPackage(packageName);
+					*static_cast<UObject**>(ptr) = pkg->GetUObject("Class", className);
+				}
+			}
+			catch (...)
+			{
+			}
+		}
+		// Other element types (struct, nested array, object) aren't handled here yet.
+	}
+
+	// Reads every indexed ini entry for a dynamic array config property (Key[0]=, Key[1]=, ...)
+	// and populates the array to match. UClass::LoadProperties()'s normal per-property loop below
+	// only handles FIXED-size arrays (prop->ArrayDimension, e.g. WeaponPriority[50]) - a dynamic
+	// array property has ArrayDimension 1 and no engine support at all for loading its config
+	// values, so it silently stayed empty regardless of what was in the ini, with no error. This
+	// is that missing piece: UBrowserAll's ListFactories (the list of master server query
+	// factories the internet server browser uses) is exactly this kind of property, which is why
+	// populating it in the ini alone had no observable effect - the object holding it never
+	// actually read those values into its own memory.
+	void LoadConfigArrayProperty(PackageManager* pm, const NameString& configName, const NameString& sectionName, const NameString& name, UArrayProperty* arrayprop, void* ptr)
+	{
+		if (!arrayprop->Inner)
+			return;
+
+		Array<std::string> values = pm->GetIniValues(configName, sectionName, name);
+		if (values.empty())
+			return;
+
+		ScriptArray* arr = static_cast<ScriptArray*>(ptr);
+		arr->Resize(values.size());
+		for (size_t i = 0; i < values.size(); i++)
+			LoadConfigArrayElement(pm, arrayprop->Inner, arr->GetItem(i), values[i]);
+	}
+
+	// Save-side counterpart of LoadConfigArrayElement, mirroring UClass::SaveProperties()'s own
+	// per-type stringification. Returns false for element types it doesn't know how to stringify
+	// (struct, nested array, object), which the caller skips rather than writing a blank entry.
+	bool SaveConfigArrayElement(UProperty* elementProp, void* ptr, std::string& out)
+	{
+		if (UObject::IsType<UByteProperty>(elementProp)) out = std::to_string(*static_cast<uint8_t*>(ptr));
+		else if (UObject::IsType<UIntProperty>(elementProp)) out = std::to_string(*static_cast<int32_t*>(ptr));
+		else if (UObject::IsType<UFloatProperty>(elementProp)) out = std::to_string(*static_cast<float*>(ptr));
+		else if (UObject::IsType<UNameProperty>(elementProp)) out = (*static_cast<NameString*>(ptr)).ToString();
+		else if (UObject::IsType<UStrProperty>(elementProp)) out = *static_cast<std::string*>(ptr);
+		else if (UObject::IsType<UStringProperty>(elementProp)) out = *static_cast<std::string*>(ptr);
+		else if (auto boolprop = UObject::TryCast<UBoolProperty>(elementProp)) out = boolprop->GetBool(ptr) ? "True" : "False";
+		else return false;
+		return true;
+	}
+
+	// Save-side counterpart of LoadConfigArrayProperty: writes a dynamic array's elements back out
+	// as indexed ini entries (Key[0]=, Key[1]=, ...), which UClass::SaveProperties()'s normal loop
+	// below has no support for either (same gap as the load side).
+	void SaveConfigArrayProperty(PackageManager* pm, const NameString& configName, const NameString& sectionName, const NameString& name, UArrayProperty* arrayprop, void* ptr)
+	{
+		if (!arrayprop->Inner)
+			return;
+
+		ScriptArray* arr = static_cast<ScriptArray*>(ptr);
+		Array<std::string> values;
+		values.reserve(arr->GetSize());
+		for (size_t i = 0, count = arr->GetSize(); i < count; i++)
+		{
+			std::string value;
+			if (SaveConfigArrayElement(arrayprop->Inner, arr->GetItem(i), value))
+				values.push_back(value);
+		}
+		if (!values.empty())
+			pm->SetIniValues(configName, sectionName, name, values, true);
+	}
+}
+
 void UClass::LoadProperties(PropertyDataBlock* propertyBlock)
 {
 	NameString sectionName = package->GetPackageName().ToString() + "." + Name.ToString();
@@ -226,6 +350,26 @@ void UClass::LoadProperties(PropertyDataBlock* propertyBlock)
 		if (AnyFlags(prop->PropFlags, PropertyFlags::Config | PropertyFlags::GlobalConfig | PropertyFlags::Localized))
 		{
 			void* ptr = propertyBlock->Ptr(prop);
+
+			if (auto arrayprop = UObject::TryCast<UArrayProperty>(prop))
+			{
+				if (AllFlags(prop->PropFlags, PropertyFlags::GlobalConfig))
+				{
+					if (UClass* outer = UObject::TryCast<UClass>(prop->Outer()))
+					{
+						NameString outerSectionName = outer->package->GetPackageName().ToString() + "." + outer->Name.ToString();
+						NameString outerConfigName = outer->ClassConfigName;
+						if (outerConfigName.IsNone()) outerConfigName = "system";
+						LoadConfigArrayProperty(package->GetPackageManager(), outerConfigName, outerSectionName, prop->Name, arrayprop, ptr);
+					}
+				}
+				else if (AllFlags(prop->PropFlags, PropertyFlags::Config))
+				{
+					LoadConfigArrayProperty(package->GetPackageManager(), configName, sectionName, prop->Name, arrayprop, ptr);
+				}
+				continue;
+			}
+
 			for (int arrayIndex = 0; arrayIndex < prop->ArrayDimension; arrayIndex++)
 			{
 				NameString name = prop->Name;
@@ -411,6 +555,28 @@ void UClass::SaveProperties(PropertyDataBlock* propertyBlock)
 		if (AnyFlags(prop->PropFlags, PropertyFlags::Config | PropertyFlags::GlobalConfig))
 		{
 			auto ptr = propertyBlock->Ptr(prop);
+
+			if (auto arrayprop = UObject::TryCast<UArrayProperty>(prop))
+			{
+				if (AllFlags(prop->PropFlags, PropertyFlags::GlobalConfig))
+				{
+					if (UClass* outer = UObject::TryCast<UClass>(prop->Outer()))
+					{
+						NameString outerSectionName = outer->package->GetPackageName().ToString() + "." + outer->Name.ToString();
+						NameString outerConfigName = outer->ClassConfigName;
+						if (outerConfigName.IsNone()) outerConfigName = "system";
+						SaveConfigArrayProperty(package->GetPackageManager(), outerConfigName, outerSectionName, prop->Name, arrayprop, ptr);
+					}
+				}
+				else if (AllFlags(prop->PropFlags, PropertyFlags::Config))
+				{
+					SaveConfigArrayProperty(package->GetPackageManager(), configName, sectionName, prop->Name, arrayprop, ptr);
+				}
+				if (debugConfig)
+					fprintf(stderr, "[Config]   array property %s saved\n", prop->Name.ToString().c_str());
+				continue;
+			}
+
 			for (int arrayIndex = 0; arrayIndex < prop->ArrayDimension; arrayIndex++)
 			{
 				NameString name = prop->Name;
