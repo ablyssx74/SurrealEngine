@@ -1912,12 +1912,29 @@ void Engine::InputEvent(EInputKey key, EInputType type, int delta)
 
 bool Engine::ExecCommand(const Array<std::string>& args)
 {
+	static const bool debugInput = std::getenv("SE_DEBUG_INPUT") != nullptr;
+
+	const char* targetNames[2] = { "viewport->Actor()", "console" };
+	int targetIndex = 0;
 	for (UObject* target : { static_cast<UObject*>(viewport->Actor()), static_cast<UObject*>(console) })
 	{
+		const char* targetName = targetNames[targetIndex++];
+
 		if (!target)
+		{
+			if (debugInput)
+				fprintf(stderr, "[Input] ExecCommand(\"%s\"): target=%s is null, skipping\n", args[0].c_str(), targetName);
 			continue;
+		}
 
 		UFunction* func = FindEventFunction(target, args[0]);
+		if (debugInput)
+		{
+			if (!func)
+				fprintf(stderr, "[Input] ExecCommand(\"%s\"): target=%s (class=%s) FindEventFunction found nothing\n", args[0].c_str(), targetName, target->Class ? target->Class->Name.ToString().c_str() : "?");
+			else
+				fprintf(stderr, "[Input] ExecCommand(\"%s\"): target=%s (class=%s) FindEventFunction found \"%s\", FuncFlags=0x%llx, HasExecFlag=%d\n", args[0].c_str(), targetName, target->Class ? target->Class->Name.ToString().c_str() : "?", func->Name.ToString().c_str(), (unsigned long long)func->FuncFlags, AllFlags(func->FuncFlags, FunctionFlags::Exec) ? 1 : 0);
+		}
 		if (func && AllFlags(func->FuncFlags, FunctionFlags::Exec))
 		{
 			Array<ExpressionValue> vmArgs;
