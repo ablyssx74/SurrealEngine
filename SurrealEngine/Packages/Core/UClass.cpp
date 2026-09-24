@@ -16,6 +16,7 @@
 #include "VM/ScriptCall.h"
 #include "Package/PackageManager.h"
 #include "Engine.h"
+#include <cstdlib>
 
 UClass::UClass(NameString name, UClass* base, ObjectFlags flags) : UState(std::move(name), nullptr, flags, base)
 {
@@ -385,6 +386,19 @@ void UClass::LoadProperties(PropertyDataBlock* propertyBlock)
 
 void UClass::SaveProperties(PropertyDataBlock* propertyBlock)
 {
+	// Diagnostic: set SE_DEBUG_CONFIG=1 to trace every SaveProperties() call and whether it's
+	// actually allowed to write anything - a class whose ClassFlags don't include Config never
+	// gets its config/globalconfig properties saved at all, silently, regardless of how those
+	// individual properties are flagged. Useful for tracking down a setting that looks like it
+	// should persist (e.g. a config property visible in the game's own ini) but doesn't survive
+	// a restart when changed through SurrealEngine.
+	static const bool debugConfig = std::getenv("SE_DEBUG_CONFIG") != nullptr;
+	if (debugConfig)
+	{
+		fprintf(stderr, "[Config] SaveProperties() called on class %s (ClassFlags::Config %s)\n",
+			Name.ToString().c_str(), (ClsFlags & ClassFlags::Config) ? "set" : "NOT set - saving skipped entirely");
+	}
+
 	if (!(ClsFlags & ClassFlags::Config))
 		return;
 
@@ -413,6 +427,14 @@ void UClass::SaveProperties(PropertyDataBlock* propertyBlock)
 				else if (UObject::IsType<UStringProperty>(prop)) value = *static_cast<std::string*>(ptr);
 				else if (auto boolprop = UObject::TryCast<UBoolProperty>(prop)) value = boolprop->GetBool(ptr) ? "True" : "False";
 				else unsupported = true;
+
+				if (debugConfig)
+				{
+					fprintf(stderr, "[Config]   property %s = \"%s\" (%s%s)\n", name.ToString().c_str(), value.c_str(),
+						unsupported ? "UNSUPPORTED TYPE, not saved" : "saving",
+						AnyFlags(prop->PropFlags, PropertyFlags::GlobalConfig) ? ", GlobalConfig" :
+							AnyFlags(prop->PropFlags, PropertyFlags::Config) ? ", Config" : "");
+				}
 
 				if (!unsupported)
 				{

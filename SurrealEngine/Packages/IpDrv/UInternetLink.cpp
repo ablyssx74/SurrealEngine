@@ -6,6 +6,7 @@
 #include "Package/PackageManager.h"
 #include "Packages/Core/UFunction.h"
 #include "Engine.h"
+#include <cstdlib>
 
 #ifdef WIN32
 #include <WinSock2.h>
@@ -72,6 +73,13 @@ bool UInternetLink::IsDataPending()
 
 void UInternetLink::Resolve(const std::string& Domain)
 {
+	// Diagnostic: set SE_DEBUG_NET=1 to trace DNS resolution requests/results. Note Port is
+	// unconditionally set to 7777 (the default UT game port) here regardless of what the caller
+	// actually wants to connect to afterward - fine if the calling script always overwrites Port
+	// itself before using the resolved address, wrong (and worth fixing) if it doesn't and this
+	// silently sends every resolved connection attempt at the wrong port.
+	static const bool debugNet = std::getenv("SE_DEBUG_NET") != nullptr;
+
 	std::unique_lock<std::mutex> lock(Mutex);
 	if (ResolveStatus != 1)
 	{
@@ -81,8 +89,11 @@ void UInternetLink::Resolve(const std::string& Domain)
 			Thread.detach();
 
 		std::string _address = Domain;
-		auto threadMain = [this, _address]()
+		auto threadMain = [this, _address, debugNet]()
 			{
+				if (debugNet)
+					fprintf(stderr, "[Net] Resolving \"%s\"...\n", _address.c_str());
+
 				in_addr_t ipv4_address = inet_addr(_address.c_str());
 				if (ipv4_address == INADDR_NONE)
 				{
@@ -90,6 +101,20 @@ void UInternetLink::Resolve(const std::string& Domain)
 					if (host)
 					{
 						ipv4_address = *((in_addr_t*)host->h_addr_list[0]);
+					}
+				}
+
+				if (debugNet)
+				{
+					if (ipv4_address != INADDR_NONE)
+					{
+						uint8_t* b = (uint8_t*)&ipv4_address;
+						fprintf(stderr, "[Net] Resolved \"%s\" -> %u.%u.%u.%u (port defaults to 7777 unless the caller overrides it)\n",
+							_address.c_str(), b[0], b[1], b[2], b[3]);
+					}
+					else
+					{
+						fprintf(stderr, "[Net] Failed to resolve \"%s\"\n", _address.c_str());
 					}
 				}
 

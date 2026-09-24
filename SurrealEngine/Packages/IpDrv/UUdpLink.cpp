@@ -7,6 +7,7 @@
 #include "Engine.h"
 #include <algorithm>
 #include <cstring>
+#include <cstdlib>
 
 #ifdef WIN32
 #include <WinSock2.h>
@@ -21,6 +22,24 @@ typedef unsigned long in_addr_t;
 #include <unistd.h>
 static int closesocket(int fd) { return close(fd); }
 #endif
+
+namespace
+{
+	// Diagnostic: set SE_DEBUG_NET=1 to trace UdpLink send/receive activity.
+	static bool DebugNet()
+	{
+		static const bool debugNet = std::getenv("SE_DEBUG_NET") != nullptr;
+		return debugNet;
+	}
+
+	static std::string AddrToString(const IpAddr& addr)
+	{
+		uint32_t a = ntohl((uint32_t)addr.Addr);
+		char buf[32];
+		snprintf(buf, sizeof(buf), "%u.%u.%u.%u:%u", (a >> 24) & 0xff, (a >> 16) & 0xff, (a >> 8) & 0xff, a & 0xff, ntohs(addr.Port));
+		return buf;
+	}
+}
 
 UUdpLink::UUdpLink(NameString name, UClass* base, ObjectFlags flags) : UInternetLink(name, base, flags)
 {
