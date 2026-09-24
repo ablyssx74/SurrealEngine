@@ -4,6 +4,7 @@
 #include "VM/ScriptCall.h"
 #include "VM/Frame.h"
 #include "Package/PackageManager.h"
+#include "Packages/Core/UClass.h"
 #include "Engine.h"
 #include <algorithm>
 #include <cstring>
