@@ -377,9 +377,20 @@ void UClass::LoadProperties(PropertyDataBlock* propertyBlock, UObject* instance)
 		// is being called on here.
 		for (UProperty* p : Properties)
 		{
-			fprintf(stderr, "[Config]   property %s (array=%s, Config=%s, GlobalConfig=%s)\n",
-				p->Name.ToString().c_str(),
-				UObject::TryCast<UArrayProperty>(p) ? "yes" : "no",
+			const char* typeName =
+				UObject::TryCast<UArrayProperty>(p) ? "Array" :
+				UObject::TryCast<UStructProperty>(p) ? "Struct" :
+				UObject::TryCast<UClassProperty>(p) ? "Class" :
+				UObject::TryCast<UObjectProperty>(p) ? "Object" :
+				UObject::TryCast<UStrProperty>(p) ? "Str" :
+				UObject::TryCast<UStringProperty>(p) ? "String" :
+				UObject::TryCast<UNameProperty>(p) ? "Name" :
+				UObject::TryCast<UBoolProperty>(p) ? "Bool" :
+				UObject::TryCast<UByteProperty>(p) ? "Byte" :
+				UObject::TryCast<UIntProperty>(p) ? "Int" :
+				UObject::TryCast<UFloatProperty>(p) ? "Float" : "Other";
+			fprintf(stderr, "[Config]   property %s type=%s dim=%d (Config=%s, GlobalConfig=%s)\n",
+				p->Name.ToString().c_str(), typeName, p->ArrayDimension,
 				AnyFlags(p->PropFlags, PropertyFlags::Config) ? "yes" : "no",
 				AnyFlags(p->PropFlags, PropertyFlags::GlobalConfig) ? "yes" : "no");
 		}
@@ -411,9 +422,14 @@ void UClass::LoadProperties(PropertyDataBlock* propertyBlock, UObject* instance)
 
 			for (int arrayIndex = 0; arrayIndex < prop->ArrayDimension; arrayIndex++)
 			{
+				// Bug: ini keys are stored bare ("ListFactories"), with the "[N]=" index parsed
+				// out separately (see IniKey/IniSection) - looking them up by a key literally
+				// named "ListFactories[0]" (as this used to do) can never match, so every fixed-
+				// size (ArrayDimension > 1) config array property silently loaded as empty
+				// regardless of what the ini said. GetIniValue()'s `index` parameter is how you're
+				// meant to select the Nth value of the (bare-named) key.
 				NameString name = prop->Name;
-				if (prop->ArrayDimension > 1)
-					name = NameString(name.ToString() + "[" + std::to_string(arrayIndex) + "]");
+				NameString displayName = prop->ArrayDimension > 1 ? NameString(name.ToString() + "[" + std::to_string(arrayIndex) + "]") : name;
 
 				std::string value;
 				if (AllFlags(prop->PropFlags, PropertyFlags::GlobalConfig))
@@ -423,16 +439,23 @@ void UClass::LoadProperties(PropertyDataBlock* propertyBlock, UObject* instance)
 						NameString outerSectionName = outer->package->GetPackageName().ToString() + "." + outer->Name.ToString();
 						NameString outerConfigName = outer->ClassConfigName;
 						if (outerConfigName.IsNone()) outerConfigName = "system";
-						value = package->GetPackageManager()->GetIniValue(outerConfigName, outerSectionName, name);
+						value = package->GetPackageManager()->GetIniValue(outerConfigName, outerSectionName, name, "", arrayIndex);
 					}
 				}
 				else if (AllFlags(prop->PropFlags, PropertyFlags::Config))
 				{
-					value = package->GetPackageManager()->GetIniValue(configName, sectionName, name);
+					value = package->GetPackageManager()->GetIniValue(configName, sectionName, name, "", arrayIndex);
 				}
 				else if (AllFlags(prop->PropFlags, PropertyFlags::Localized))
 				{
-					value = package->GetPackageManager()->Localize(package->GetPackageName(), Name, name);
+					value = package->GetPackageManager()->Localize(package->GetPackageName(), Name, displayName);
+				}
+
+				if (debugConfig && instance && prop->Name == "ListFactories")
+				{
+					fprintf(stderr, "[Config]   ListFactories[%d] (section [%s], key \"%s\") -> %s\n",
+						arrayIndex, sectionName.ToString().c_str(), displayName.ToString().c_str(),
+						value.empty() ? "(empty)" : ("\"" + value + "\"").c_str());
 				}
 
 				if (!value.empty())
@@ -621,9 +644,13 @@ void UClass::SaveProperties(PropertyDataBlock* propertyBlock, UObject* instance)
 
 			for (int arrayIndex = 0; arrayIndex < prop->ArrayDimension; arrayIndex++)
 			{
+				// See the matching bug/fix note in LoadProperties(): ini keys are stored bare, so
+				// the lookup/write index has to go through SetIniValue()'s `index` parameter
+				// rather than being baked into the key name as "Key[N]" - that string was never a
+				// real key, so every fixed-size config array silently failed to round-trip.
 				NameString name = prop->Name;
-				if (prop->ArrayDimension > 1)
-					name = NameString(name.ToString() + "[" + std::to_string(arrayIndex) + "]");
+				bool indexed = prop->ArrayDimension > 1;
+				NameString displayName = indexed ? NameString(name.ToString() + "[" + std::to_string(arrayIndex) + "]") : name;
 
 				bool unsupported = false;
 				std::string value;
@@ -638,7 +665,7 @@ void UClass::SaveProperties(PropertyDataBlock* propertyBlock, UObject* instance)
 
 				if (debugConfig)
 				{
-					fprintf(stderr, "[Config]   property %s = \"%s\" (%s%s)\n", name.ToString().c_str(), value.c_str(),
+					fprintf(stderr, "[Config]   property %s = \"%s\" (%s%s)\n", displayName.ToString().c_str(), value.c_str(),
 						unsupported ? "UNSUPPORTED TYPE, not saved" : "saving",
 						AnyFlags(prop->PropFlags, PropertyFlags::GlobalConfig) ? ", GlobalConfig" :
 							AnyFlags(prop->PropFlags, PropertyFlags::Config) ? ", Config" : "");
@@ -653,12 +680,12 @@ void UClass::SaveProperties(PropertyDataBlock* propertyBlock, UObject* instance)
 							NameString outerSectionName = outer->package->GetPackageName().ToString() + "." + outer->Name.ToString();
 							NameString outerConfigName = outer->ClassConfigName;
 							if (outerConfigName.IsNone()) outerConfigName = "system";
-							package->GetPackageManager()->SetIniValue(outerConfigName, outerSectionName, name, value);
+							package->GetPackageManager()->SetIniValue(outerConfigName, outerSectionName, name, value, arrayIndex, indexed);
 						}
 					}
 					else if (AnyFlags(prop->PropFlags, PropertyFlags::Config))
 					{
-						package->GetPackageManager()->SetIniValue(configName, sectionName, name, value);
+						package->GetPackageManager()->SetIniValue(configName, sectionName, name, value, arrayIndex, indexed);
 					}
 				}
 				ptr = static_cast<uint8_t*>(ptr) + prop->ElementPitch();

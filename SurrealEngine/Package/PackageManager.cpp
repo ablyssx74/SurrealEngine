@@ -790,9 +790,9 @@ Array<std::string> PackageManager::GetDefUserIniValues(const NameString& section
 	return defaultUserFile->GetValues(sectionName, keyName, default_values);
 }
 
-void PackageManager::SetIniValue(NameString iniName, const NameString& sectionName, const NameString& keyName, const std::string& newValue, const int index)
+void PackageManager::SetIniValue(NameString iniName, const NameString& sectionName, const NameString& keyName, const std::string& newValue, const int index, const bool indexed)
 {
-	LoadIniFile(iniName)->SetValue(sectionName, keyName, newValue, index);
+	LoadIniFile(iniName)->SetValue(sectionName, keyName, newValue, index, indexed);
 }
 
 void PackageManager::SetIniValues(NameString iniName, const NameString& sectionName, const NameString& keyName, const Array<std::string>& newValues, const bool indexed)

@@ -81,7 +81,7 @@ public:
 	Array<std::string> GetDefaultIniValues(const NameString& sectionName, const NameString& keyName, Array<std::string> default_values = {});
 	std::string GetDefUserIniValue(const NameString& sectionName, const NameString& keyName, std::string default_value = "", const int index = 0);
 	Array<std::string> GetDefUserIniValues(const NameString& sectionName, const NameString& keyName, Array<std::string> default_values = {});
-	void SetIniValue(NameString iniName, const NameString& sectionName, const NameString& keyName, const std::string& newValue, const int index = 0);
+	void SetIniValue(NameString iniName, const NameString& sectionName, const NameString& keyName, const std::string& newValue, const int index = 0, const bool indexed = false);
 	void SetIniValues(NameString iniName, const NameString& sectionName, const NameString& keyName, const Array<std::string>& newValues, const bool indexed = false);
 	void SaveAllIniFiles();
 
