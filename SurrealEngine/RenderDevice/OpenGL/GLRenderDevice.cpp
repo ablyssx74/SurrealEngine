@@ -1055,15 +1055,6 @@ void GLRenderDevice::Lock(vec4 InFlashScale, vec4 InFlashFog, vec4 ScreenClear, 
 
 	IsLocked = true;
 
-	// Diagnostic: periodically dump what's actually being submitted to the renderer,
-	// to tell apart "surfaces aren't being drawn at all" from "they're drawn but wrong".
-	static int lockCount = 0;
-	if ((lockCount++ % 60) == 0)
-	{
-		fprintf(stderr, "[GL] ClearColor: (%.2f, %.2f, %.2f, %.2f)  Stats since startup: ComplexSurfaces=%d GouraudPolygons=%d Tiles=%d DrawCalls=%d\n",
-			color[0], color[1], color[2], color[3], Stats.ComplexSurfaces, Stats.GouraudPolygons, Stats.Tiles, Stats.DrawCalls);
-	}
-
 	ThrowIfGLError("Lock failed");
 }
 
