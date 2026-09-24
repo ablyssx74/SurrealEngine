@@ -110,21 +110,23 @@ void UInternetLink::Resolve(const std::string& Domain)
 		if (Thread.joinable())
 			Thread.detach();
 
+		std::string objLabel = (Class ? Class->Name.ToString() : "?") + "'" + Name.ToString() + "'";
+
 		std::string _address = Domain;
 		for (const auto& replacement : deadServerReplacements)
 		{
 			if (_address == replacement.first)
 			{
 				if (debugNet)
-					fprintf(stderr, "[Net] Resolve(): substituting dead master server \"%s\" -> \"%s\"\n", _address.c_str(), replacement.second.c_str());
+					fprintf(stderr, "[Net] %s Resolve(): substituting dead master server \"%s\" -> \"%s\"\n", objLabel.c_str(), _address.c_str(), replacement.second.c_str());
 				_address = replacement.second;
 				break;
 			}
 		}
-		auto threadMain = [this, _address, debugNet]()
+		auto threadMain = [this, _address, debugNet, objLabel]()
 			{
 				if (debugNet)
-					fprintf(stderr, "[Net] Resolving \"%s\"...\n", _address.c_str());
+					fprintf(stderr, "[Net] %s Resolving \"%s\"...\n", objLabel.c_str(), _address.c_str());
 
 				in_addr_t ipv4_address = inet_addr(_address.c_str());
 				if (ipv4_address == INADDR_NONE)
@@ -141,12 +143,12 @@ void UInternetLink::Resolve(const std::string& Domain)
 					if (ipv4_address != INADDR_NONE)
 					{
 						uint8_t* b = (uint8_t*)&ipv4_address;
-						fprintf(stderr, "[Net] Resolved \"%s\" -> %u.%u.%u.%u (port defaults to 7777 unless the caller overrides it)\n",
-							_address.c_str(), b[0], b[1], b[2], b[3]);
+						fprintf(stderr, "[Net] %s Resolved \"%s\" -> %u.%u.%u.%u (port defaults to 7777 unless the caller overrides it)\n",
+							objLabel.c_str(), _address.c_str(), b[0], b[1], b[2], b[3]);
 					}
 					else
 					{
-						fprintf(stderr, "[Net] Failed to resolve \"%s\"\n", _address.c_str());
+						fprintf(stderr, "[Net] %s Failed to resolve \"%s\"\n", objLabel.c_str(), _address.c_str());
 					}
 				}
 

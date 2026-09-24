@@ -84,6 +84,18 @@ namespace
 		snprintf(buf, sizeof(buf), "%u.%u.%u.%u:%u", (a >> 24) & 0xff, (a >> 16) & 0xff, (a >> 8) & 0xff, a & 0xff, ntohs(addr.Port));
 		return buf;
 	}
+
+	// Diagnostic: identifies which script class/instance a trace line belongs to - needed to tell
+	// apart e.g. concurrent UBrowserGSpyLink instances (one per configured master server) or a
+	// server-heartbeat UdpServerUplink connection from an actual browser query, which otherwise
+	// look identical in the log.
+	static std::string ObjLabel(UObject* obj)
+	{
+		if (!obj)
+			return "?";
+		std::string className = obj->Class ? obj->Class->Name.ToString() : "?";
+		return className + "'" + obj->Name.ToString() + "'";
+	}
 }
 
 UTcpLink::UTcpLink(NameString name, UClass* base, ObjectFlags flags) : UInternetLink(name, base, flags)
@@ -127,14 +139,14 @@ void UTcpLink::Tick(float elapsed)
 			if (error != 0 || FD_ISSET(handle, &exceptfds))
 			{
 				if (DebugNet())
-					fprintf(stderr, "[Net] TcpLink connect to %s failed (SO_ERROR=%d)\n", AddrToString(RemoteAddr()).c_str(), error);
+					fprintf(stderr, "[Net] %s TcpLink connect to %s failed (SO_ERROR=%d)\n", ObjLabel(this).c_str(), AddrToString(RemoteAddr()).c_str(), error);
 				LinkState() = STATE_Initialized;
 				CallEvent(this, EventName::Closed);
 			}
 			else
 			{
 				if (DebugNet())
-					fprintf(stderr, "[Net] TcpLink connected to %s\n", AddrToString(RemoteAddr()).c_str());
+					fprintf(stderr, "[Net] %s TcpLink connected to %s\n", ObjLabel(this).c_str(), AddrToString(RemoteAddr()).c_str());
 				LinkState() = STATE_Connected;
 				CallEvent(this, EventName::Opened);
 			}
@@ -147,7 +159,7 @@ void UTcpLink::Tick(float elapsed)
 		if (received > 0)
 		{
 			if (DebugNet())
-				fprintf(stderr, "[Net] TcpLink received %d bytes from %s\n", received, AddrToString(RemoteAddr()).c_str());
+				fprintf(stderr, "[Net] %s TcpLink received %d bytes from %s\n", ObjLabel(this).c_str(), received, AddrToString(RemoteAddr()).c_str());
 			ReceiveBuffer.append(buffer, received);
 			DataPending() = 1;
 			DispatchReceived();
@@ -155,14 +167,14 @@ void UTcpLink::Tick(float elapsed)
 		else if (received == 0)
 		{
 			if (DebugNet())
-				fprintf(stderr, "[Net] TcpLink connection to %s closed by remote\n", AddrToString(RemoteAddr()).c_str());
+				fprintf(stderr, "[Net] %s TcpLink connection to %s closed by remote\n", ObjLabel(this).c_str(), AddrToString(RemoteAddr()).c_str());
 			Close();
 			CallEvent(this, EventName::Closed);
 		}
 		else if (!WouldBlock())
 		{
 			if (DebugNet())
-				fprintf(stderr, "[Net] TcpLink recv() error on connection to %s, closing\n", AddrToString(RemoteAddr()).c_str());
+				fprintf(stderr, "[Net] %s TcpLink recv() error on connection to %s, closing\n", ObjLabel(this).c_str(), AddrToString(RemoteAddr()).c_str());
 			Close();
 			CallEvent(this, EventName::Closed);
 		}
@@ -176,7 +188,7 @@ void UTcpLink::DispatchReceived()
 	if (ReceiveMode() != RMODE_Event)
 	{
 		if (DebugNet())
-			fprintf(stderr, "[Net] TcpLink data buffered (ReceiveMode=Manual, %d bytes waiting for ReadText/ReadBinary poll)\n", (int)ReceiveBuffer.size());
+			fprintf(stderr, "[Net] %s TcpLink data buffered (ReceiveMode=Manual, LinkMode=%d, %d bytes waiting for ReadText/ReadBinary poll)\n", ObjLabel(this).c_str(), (int)LinkMode(), (int)ReceiveBuffer.size());
 		return;
 	}
 
@@ -190,7 +202,7 @@ void UTcpLink::DispatchReceived()
 				line.pop_back();
 			ReceiveBuffer.erase(0, pos + 1);
 			if (DebugNet())
-				fprintf(stderr, "[Net] TcpLink firing ReceivedLine: \"%s\"\n", line.c_str());
+				fprintf(stderr, "[Net] %s TcpLink firing ReceivedLine: \"%s\"\n", ObjLabel(this).c_str(), line.c_str());
 			CallEvent(this, EventName::ReceivedLine, { ExpressionValue::StringValue(line) });
 		}
 		DataPending() = ReceiveBuffer.empty() ? 0 : 1;
@@ -203,12 +215,13 @@ void UTcpLink::DispatchReceived()
 			ReceiveBuffer.clear();
 			DataPending() = 0;
 			if (DebugNet())
-				fprintf(stderr, "[Net] TcpLink firing ReceivedText: %d bytes\n", (int)text.size());
+				fprintf(stderr, "[Net] %s TcpLink firing ReceivedText: %d bytes\n", ObjLabel(this).c_str(), (int)text.size());
 			CallEvent(this, EventName::ReceivedText, { ExpressionValue::StringValue(text) });
 		}
 	}
 	// MODE_Binary isn't auto-dispatched as a ReceivedBinary event yet - ReadBinary() can still
-	// be polled manually regardless of ReceiveMode.
+	// be polled manually regardless of ReceiveMode. (Diagnostic above now reports LinkMode so a
+	// debug log makes it possible to tell whether this gap is actually being hit.)
 }
 
 int UTcpLink::BindPort(int Port, bool bUseNextAvailable)
@@ -237,7 +250,7 @@ int UTcpLink::BindPort(int Port, bool bUseNextAvailable)
 		if (result == -1)
 		{
 			if (DebugNet())
-				fprintf(stderr, "[Net] TcpLink.BindPort(%d) failed (errno=%d), %s\n", Port + attempt, errno,
+				fprintf(stderr, "[Net] %s TcpLink.BindPort(%d) failed (errno=%d), %s\n", ObjLabel(this).c_str(), Port + attempt, errno,
 					attempt + 1 < maxAttempts ? "trying next port" : "giving up");
 			continue;
 		}
@@ -252,7 +265,7 @@ int UTcpLink::BindPort(int Port, bool bUseNextAvailable)
 			return 0;
 
 		if (DebugNet())
-			fprintf(stderr, "[Net] TcpLink.BindPort: bound to port %d\n", ntohs(addr.sin_port));
+			fprintf(stderr, "[Net] %s TcpLink.BindPort: bound to port %d\n", ObjLabel(this).c_str(), ntohs(addr.sin_port));
 
 		return ntohs(addr.sin_port);
 	}
@@ -269,13 +282,13 @@ bool UTcpLink::Listen()
 bool UTcpLink::Open(const IpAddr& Addr)
 {
 	if (DebugNet())
-		fprintf(stderr, "[Net] TcpLink.Open(%s) called (handle %s, LinkState=%d)\n",
-			AddrToString(Addr).c_str(), handle != invalid_socket_value ? "valid" : "INVALID", (int)LinkState());
+		fprintf(stderr, "[Net] %s TcpLink.Open(%s) called (handle %s, LinkState=%d, raw Addr.Port=%d)\n",
+			ObjLabel(this).c_str(), AddrToString(Addr).c_str(), handle != invalid_socket_value ? "valid" : "INVALID", (int)LinkState(), (int)Addr.Port);
 
 	if (handle == invalid_socket_value || LinkState() != STATE_Initialized)
 	{
 		if (DebugNet())
-			fprintf(stderr, "[Net] TcpLink.Open() rejected (bad handle or not in Initialized state)\n");
+			fprintf(stderr, "[Net] %s TcpLink.Open() rejected (bad handle or not in Initialized state)\n", ObjLabel(this).c_str());
 		return false;
 	}
 
@@ -290,9 +303,9 @@ bool UTcpLink::Open(const IpAddr& Addr)
 	{
 		if (DebugNet())
 #ifdef WIN32
-			fprintf(stderr, "[Net] TcpLink connect() to %s failed immediately (WSAError=%d)\n", AddrToString(Addr).c_str(), WSAGetLastError());
+			fprintf(stderr, "[Net] %s TcpLink connect() to %s failed immediately (WSAError=%d)\n", ObjLabel(this).c_str(), AddrToString(Addr).c_str(), WSAGetLastError());
 #else
-			fprintf(stderr, "[Net] TcpLink connect() to %s failed immediately (errno=%d %s)\n", AddrToString(Addr).c_str(), errno, strerror(errno));
+			fprintf(stderr, "[Net] %s TcpLink connect() to %s failed immediately (errno=%d %s)\n", ObjLabel(this).c_str(), AddrToString(Addr).c_str(), errno, strerror(errno));
 #endif
 		return false;
 	}
@@ -301,13 +314,13 @@ bool UTcpLink::Open(const IpAddr& Addr)
 	if (result == -1)
 	{
 		if (DebugNet())
-			fprintf(stderr, "[Net] TcpLink connect() to %s in progress (non-blocking)\n", AddrToString(Addr).c_str());
+			fprintf(stderr, "[Net] %s TcpLink connect() to %s in progress (non-blocking)\n", ObjLabel(this).c_str(), AddrToString(Addr).c_str());
 		LinkState() = STATE_Connecting;
 	}
 	else
 	{
 		if (DebugNet())
-			fprintf(stderr, "[Net] TcpLink connected to %s immediately\n", AddrToString(Addr).c_str());
+			fprintf(stderr, "[Net] %s TcpLink connected to %s immediately\n", ObjLabel(this).c_str(), AddrToString(Addr).c_str());
 		LinkState() = STATE_Connected;
 		CallEvent(this, EventName::Opened);
 	}
@@ -372,7 +385,7 @@ int UTcpLink::SendText(const std::string& Str)
 	if (LinkState() != STATE_Connected)
 	{
 		if (DebugNet())
-			fprintf(stderr, "[Net] TcpLink.SendText() called while not connected (LinkState=%d), ignored\n", (int)LinkState());
+			fprintf(stderr, "[Net] %s TcpLink.SendText() called while not connected (LinkState=%d), ignored\n", ObjLabel(this).c_str(), (int)LinkState());
 		return 0;
 	}
 
@@ -382,6 +395,6 @@ int UTcpLink::SendText(const std::string& Str)
 
 	int result = send(handle, msg.c_str(), (int)msg.size(), 0);
 	if (DebugNet())
-		fprintf(stderr, "[Net] TcpLink.SendText(%d bytes) -> %d\n", (int)msg.size(), result);
+		fprintf(stderr, "[Net] %s TcpLink.SendText(%d bytes) -> %d\n", ObjLabel(this).c_str(), (int)msg.size(), result);
 	return result == -1 ? 0 : result;
 }
