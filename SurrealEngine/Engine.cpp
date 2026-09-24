@@ -1752,6 +1752,15 @@ void Engine::OnWindowActivated()
 void Engine::OnWindowDeactivated()
 {
 	//SetPause(true);
+
+	// Nothing here used to actually release relative mouse mode on losing focus - this relied
+	// entirely on the backend/OS releasing the mouse grab implicitly when the window lost focus.
+	// That's apparently not reliable everywhere (e.g. SDL2 on Haiku: alt-tabbing away left the
+	// cursor locked to the center of the screen system-wide, not just inside the game window).
+	// Explicitly unlocking here means losing focus always releases the grab regardless of backend
+	// behavior; OnWindowActivated()'s ReassertCursorLock() re-engages it when focus comes back.
+	if (window)
+		window->UnlockCursor();
 }
 
 void Engine::ReassertCursorLock()

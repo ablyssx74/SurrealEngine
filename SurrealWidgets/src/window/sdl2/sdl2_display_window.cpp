@@ -529,6 +529,12 @@ void SDL2DisplayWindow::OnWindowEvent(const SDL_WindowEvent& event)
 			break;
 
 		case SDL_WINDOWEVENT_FOCUS_GAINED:
+			// Bug: this used to fall through to OnWindowDeactivated() same as FOCUS_LOST below,
+			// so the engine was never told the window had regained focus at all - see the SDL3
+			// backend's OnWindowFocusChanged equivalent, which already gets this right.
+			WindowHost->OnWindowActivated();
+			break;
+
 		case SDL_WINDOWEVENT_FOCUS_LOST:
 			WindowHost->OnWindowDeactivated();
 			break;
