@@ -431,6 +431,9 @@ void UClass::LoadProperties(PropertyDataBlock* propertyBlock, UObject* instance)
 				NameString name = prop->Name;
 				NameString displayName = prop->ArrayDimension > 1 ? NameString(name.ToString() + "[" + std::to_string(arrayIndex) + "]") : name;
 
+				bool traceThis = debugConfig && (prop->Name == "ListFactories" || prop->Name == "ServerListNames");
+				NameString usedIniName, usedSectionName;
+
 				std::string value;
 				if (AllFlags(prop->PropFlags, PropertyFlags::GlobalConfig))
 				{
@@ -440,21 +443,30 @@ void UClass::LoadProperties(PropertyDataBlock* propertyBlock, UObject* instance)
 						NameString outerConfigName = outer->ClassConfigName;
 						if (outerConfigName.IsNone()) outerConfigName = "system";
 						value = package->GetPackageManager()->GetIniValue(outerConfigName, outerSectionName, name, "", arrayIndex);
+						usedIniName = outerConfigName;
+						usedSectionName = outerSectionName;
+					}
+					else if (traceThis)
+					{
+						fprintf(stderr, "[Config]   %s: prop->Outer() is not a UClass - GlobalConfig lookup skipped entirely\n", displayName.ToString().c_str());
 					}
 				}
 				else if (AllFlags(prop->PropFlags, PropertyFlags::Config))
 				{
 					value = package->GetPackageManager()->GetIniValue(configName, sectionName, name, "", arrayIndex);
+					usedIniName = configName;
+					usedSectionName = sectionName;
 				}
 				else if (AllFlags(prop->PropFlags, PropertyFlags::Localized))
 				{
 					value = package->GetPackageManager()->Localize(package->GetPackageName(), Name, displayName);
 				}
 
-				if (debugConfig && instance && prop->Name == "ListFactories")
+				if (traceThis)
 				{
-					fprintf(stderr, "[Config]   ListFactories[%d] (section [%s], key \"%s\") -> %s\n",
-						arrayIndex, sectionName.ToString().c_str(), displayName.ToString().c_str(),
+					fprintf(stderr, "[Config]   %s (ini \"%s\", section [%s], instance=%s) -> %s\n",
+						displayName.ToString().c_str(), usedIniName.ToString().c_str(), usedSectionName.ToString().c_str(),
+						instance ? instance->Name.ToString().c_str() : "(class default)",
 						value.empty() ? "(empty)" : ("\"" + value + "\"").c_str());
 				}
 
