@@ -104,6 +104,7 @@ private:
 	std::unique_ptr<IniFile>& LoadSystemIniFile();
 	void LoadEngineIniFiles();
 	void UpdateDeadMasterServerAddresses();
+	void DefaultToLanNetSpeed();
 	void LoadFileExtensions();
 	void LoadIntFiles();
 	void LoadPackageRemaps();

@@ -321,6 +321,7 @@ PackageManager::PackageManager(const GameLaunchInfo& launchInfo) : launchInfo(la
 	RegisterFunctions();
 	LoadEngineIniFiles();
 	UpdateDeadMasterServerAddresses();
+	DefaultToLanNetSpeed();
 	LoadFileExtensions();
 	LoadIntFiles();
 	LoadPackageRemaps();
@@ -929,6 +930,46 @@ void PackageManager::UpdateDeadMasterServerAddresses()
 	// ListFactories[N]=UBrowser.UBrowserGSpyFact,MasterServerAddress=... (the address the client
 	// queries to populate the Internet server browser tab)
 	patchValues("UBrowserAll", "ListFactories", true);
+
+	// Older/base UT99 installs (e.g. a plain retail CD install that never had a later community
+	// patch applied) may not have a [UBrowserAll] section with any ListFactories at all - nothing
+	// above found for patchValues() to fix, since there's nothing there to begin with. Populate it
+	// from scratch in that case, so internet browsing works even starting from a bare install
+	// rather than only fixing an existing-but-dead configuration.
+	if (GetIniValues("System", "UBrowserAll", "ListFactories").empty())
+	{
+		SetIniValues("System", "UBrowserAll", "ListFactories",
+			{
+				"UBrowser.UBrowserGSpyFact,MasterServerAddress=master.oldunreal.com,MasterServerTCPPort=28900,Region=0,GameName=ut",
+				"UBrowser.UBrowserGSpyFact,MasterServerAddress=master.333networks.com,MasterServerTCPPort=28900,Region=0,GameName=ut",
+				"UBrowser.UBrowserGSpyFact,MasterServerAddress=master.openspy.net,MasterServerTCPPort=28900,Region=0,GameName=ut",
+			}, true);
+		// bHidden: this section is an aggregation source other tabs subset from, not a tab of its
+		// own. bFallbackFactories: try the next ListFactories entry if one master server doesn't
+		// answer, instead of giving up after the first.
+		if (GetIniValue("System", "UBrowserAll", "bHidden").empty())
+			SetIniValue("System", "UBrowserAll", "bHidden", "True");
+		if (GetIniValue("System", "UBrowserAll", "bFallbackFactories").empty())
+			SetIniValue("System", "UBrowserAll", "bFallbackFactories", "True");
+		if (debugNet)
+			fprintf(stderr, "[Net] UpdateDeadMasterServerAddresses: [UBrowserAll] had no ListFactories at all - populated with defaults\n");
+	}
+}
+
+void PackageManager::DefaultToLanNetSpeed()
+{
+	// The network speed option (Dial-up/ISDN/Cable/LAN) is supposed to persist which of
+	// ConfiguredInternetSpeed/ConfiguredLanSpeed under [Engine.Player] is active, but that
+	// doesn't currently survive a restart and hasn't been root-caused yet. There's also no real
+	// multiplayer netcode in this engine yet to actually throttle a connection based on either
+	// value in the first place - both are pure UnrealScript-interpreted properties, never read
+	// anywhere in this engine's own C++ code. So rather than chase a UI persistence bug for a
+	// setting with no functional effect yet, just make the Internet preset equal the LAN preset,
+	// so whichever one ends up selected, it's the fast one.
+	std::string lanSpeed = GetIniValue("System", "Engine.Player", "ConfiguredLanSpeed", "20000");
+	SetIniValue("System", "Engine.Player", "ConfiguredInternetSpeed", lanSpeed);
+	if (std::getenv("SE_DEBUG_CONFIG"))
+		fprintf(stderr, "[Config] DefaultToLanNetSpeed: ConfiguredInternetSpeed set to %s (matching ConfiguredLanSpeed)\n", lanSpeed.c_str());
 }
 
 void PackageManager::LoadFileExtensions()
