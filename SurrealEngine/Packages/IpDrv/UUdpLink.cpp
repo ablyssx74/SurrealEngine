@@ -5,6 +5,8 @@
 #include "VM/Frame.h"
 #include "Package/PackageManager.h"
 #include "Engine.h"
+#include <algorithm>
+#include <cstring>
 
 #ifdef WIN32
 #include <WinSock2.h>
@@ -45,11 +47,38 @@ void UUdpLink::Tick(float elapsed)
 {
 	UInternetLink::Tick(elapsed);
 
-	// int result = recvfrom(handle, (char*)data, size, 0, (sockaddr *)&addr, &addr_len);
+	if (handle == invalid_socket_value)
+		return;
 
-	// event ReceivedText(string Text);
-	// event ReceivedLine(string Line);
-	// event ReceivedBinary(int Count, byte B[255]);
+	// Drain every pending datagram this tick, queueing each one (with its sender address) for
+	// ReadText()/ReadBinary() to poll. UdpLink's original Received* events take a leading IpAddr
+	// parameter unlike TcpLink's (connectionless, so the source address matters per-message) -
+	// since that exact signature can't be verified against the loaded class metadata from this
+	// layer and calling a script event with the wrong argument shape risks a VM-level mismatch,
+	// this deliberately sticks to the polling API (which is what server-browser style UnrealScript
+	// typically uses anyway) rather than guessing at the event dispatch.
+	for (;;)
+	{
+		char buffer[4096];
+		sockaddr_in from;
+		memset(&from, 0, sizeof(sockaddr_in));
+#ifdef WIN32
+		int fromLen = sizeof(sockaddr_in);
+#else
+		socklen_t fromLen = sizeof(sockaddr_in);
+#endif
+		int received = recvfrom(handle, buffer, sizeof(buffer), 0, (sockaddr*)&from, &fromLen);
+		if (received <= 0)
+			break;
+
+		PendingDatagram datagram;
+		datagram.From.Addr = from.sin_addr.s_addr;
+		datagram.From.Port = from.sin_port;
+		datagram.Data.assign(buffer, received);
+		ReceiveQueue.push_back(std::move(datagram));
+	}
+
+	DataPending() = ReceiveQueue.empty() ? 0 : 1;
 }
 
 int UUdpLink::BindPort(int Port, bool bUseNextAvailable)
@@ -80,17 +109,44 @@ int UUdpLink::BindPort(int Port, bool bUseNextAvailable)
 
 int UUdpLink::ReadBinary(IpAddr& Addr, int Count, uint8_t& B)
 {
-	return 0;
+	if (Count <= 0 || ReceiveQueue.empty())
+		return 0;
+
+	PendingDatagram& datagram = ReceiveQueue.front();
+	Addr = datagram.From;
+	int n = std::min<int>(Count, (int)datagram.Data.size());
+	memcpy(&B, datagram.Data.data(), n);
+	ReceiveQueue.pop_front();
+	DataPending() = ReceiveQueue.empty() ? 0 : 1;
+	return n;
 }
 
 bool UUdpLink::SendBinary(const IpAddr& Addr, int Count, uint8_t B)
 {
-	return false;
+	if (Count <= 0)
+		return false;
+
+	sockaddr_in addr;
+	memset(&addr, 0, sizeof(sockaddr_in));
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = Addr.Addr;
+	addr.sin_port = Addr.Port;
+
+	int result = sendto(handle, (const char*)&B, Count, 0, (const sockaddr*)&addr, sizeof(sockaddr_in));
+	return result != -1;
 }
 
 int UUdpLink::ReadText(IpAddr& Addr, std::string& Str)
 {
-	return 0;
+	if (ReceiveQueue.empty())
+		return 0;
+
+	PendingDatagram datagram = std::move(ReceiveQueue.front());
+	ReceiveQueue.pop_front();
+	Addr = datagram.From;
+	Str = std::move(datagram.Data);
+	DataPending() = ReceiveQueue.empty() ? 0 : 1;
+	return (int)Str.size();
 }
 
 bool UUdpLink::SendText(const IpAddr& Addr, const std::string& Str)
@@ -100,6 +156,7 @@ bool UUdpLink::SendText(const IpAddr& Addr, const std::string& Str)
 
 	sockaddr_in addr;
 	memset(&addr, 0, sizeof(sockaddr_in));
+	addr.sin_family = AF_INET;
 	addr.sin_addr.s_addr = Addr.Addr;
 	addr.sin_port = Addr.Port;
 

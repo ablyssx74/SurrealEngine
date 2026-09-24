@@ -34,6 +34,9 @@ enum class EventName
 	Possess, TravelPreAccept, AcceptInventory, TravelPostAccept,
 	PostLogin, KeyType, KeyEvent,
 
+	// IpDrv link events:
+	Opened, Closed, Accepted, ReceivedText, ReceivedLine, ReceivedBinary,
+
 	MaxEventNameValue // Why isn't this part of C++ after 40+ years of people doing this in both C and C++?
 };
 
