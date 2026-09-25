@@ -48,6 +48,4 @@ private:
 	int remotePort = 0;
 	bool sentLoginReply = false;
 	int nextOutgoingPacketId = 2; // 0 was HELLO, 1 was NETSPEED+LOGIN
-	int highestServerPacketId = -1;
-	bool needsAck = false;
 };

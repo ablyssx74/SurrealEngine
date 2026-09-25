@@ -414,16 +414,15 @@ void RemoteConnection::Tick(float elapsed)
 					received, remoteHost.c_str(), remotePort, hex.c_str(), received > shown ? "..." : "");
 			}
 
-			// Every packet needs to be acked eventually, whether or not we understand its
-			// contents - without that, a real server has no way to know we're still receiving,
-			// and (as seen in testing) falls back to periodically resending an empty packet
-			// while it waits.
+			// Every packet needs to be acked, and - unlike an initial attempt this session -
+			// individually, not just "ack the latest and let it imply everything before that
+			// arrived": acking only the newest PacketId after draining a batch of received
+			// packets left a real server re-sending the exact same reliable bunch content over
+			// and over (verified byte-for-byte identical across repeats), meaning AckPacketId is
+			// evidently a per-packet acknowledgement, not a cumulative one, and the server was
+			// still waiting to hear about the earlier packets in that batch specifically.
 			int packetId = ReadPacketId((const uint8_t*)buffer, received);
-			if (packetId >= 0 && packetId > highestServerPacketId)
-			{
-				highestServerPacketId = packetId;
-				needsAck = true;
-			}
+			bool acked = false;
 
 			// Second step of the handshake: once the server's CHALLENGE arrives, reply with a real
 			// NETSPEED+LOGIN message built by our own bit-packer, using a RESPONSE value we
@@ -447,12 +446,20 @@ void RemoteConnection::Tick(float elapsed)
 					int sent = send(handle, (const char*)loginPacket.data(), (int)loginPacket.size(), 0);
 					if (DebugNet())
 						fprintf(stderr, "[Net] RemoteConnection: sent %d-byte NETSPEED+LOGIN reply (built with a real computed RESPONSE) -> %d\n", (int)loginPacket.size(), sent);
-					needsAck = false; // the login packet above already acks serverPacketId
+					acked = true; // the login packet above already acks serverPacketId
 				}
 				else if (DebugNet())
 				{
 					fprintf(stderr, "[Net] RemoteConnection: received data didn't parse as a CHALLENGE packet - not replying yet\n");
 				}
+			}
+
+			if (!acked && packetId >= 0)
+			{
+				std::vector<uint8_t> ackPacket = BuildAckPacket(nextOutgoingPacketId++, packetId);
+				int sent = send(handle, (const char*)ackPacket.data(), (int)ackPacket.size(), 0);
+				if (DebugNet())
+					fprintf(stderr, "[Net] RemoteConnection: sent %d-byte ack of server packet %d -> %d\n", (int)ackPacket.size(), packetId, sent);
 			}
 			continue;
 		}
@@ -474,17 +481,5 @@ void RemoteConnection::Tick(float elapsed)
 #endif
 		}
 		break;
-	}
-
-	// Nothing left to receive right now - if any of what we just read hasn't been acked yet
-	// (and wasn't already implicitly acked by a reply above), send a plain ack so the server
-	// knows we're still here and doesn't need to keep idling/retransmitting for us.
-	if (needsAck)
-	{
-		needsAck = false;
-		std::vector<uint8_t> ackPacket = BuildAckPacket(nextOutgoingPacketId++, highestServerPacketId);
-		int sent = send(handle, (const char*)ackPacket.data(), (int)ackPacket.size(), 0);
-		if (DebugNet())
-			fprintf(stderr, "[Net] RemoteConnection: sent %d-byte ack of server packet %d -> %d\n", (int)ackPacket.size(), highestServerPacketId, sent);
 	}
 }
