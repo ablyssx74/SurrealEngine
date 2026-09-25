@@ -93,6 +93,31 @@ namespace
 		return buf;
 	}
 
+	// Diagnostic: renders a string safely for the debug log, escaping non-printable bytes (GameSpy's
+	// master-browser protocol is mostly printable backslash-delimited fields, but the initial
+	// "secure" challenge and any binary payload can contain raw control bytes that would otherwise
+	// corrupt terminal output).
+	static std::string EscapeForLog(const std::string& s)
+	{
+		std::string result;
+		result.reserve(s.size());
+		for (unsigned char c : s)
+		{
+			if (c == '\\') result += "\\\\";
+			else if (c == '"') result += "\\\"";
+			else if (c == '\r') result += "\\r";
+			else if (c == '\n') result += "\\n";
+			else if (c < 0x20 || c >= 0x7f)
+			{
+				char buf[8];
+				snprintf(buf, sizeof(buf), "\\x%02x", c);
+				result += buf;
+			}
+			else result += (char)c;
+		}
+		return result;
+	}
+
 	// Diagnostic: identifies which script class/instance a trace line belongs to - needed to tell
 	// apart e.g. concurrent UBrowserGSpyLink instances (one per configured master server) or a
 	// server-heartbeat UdpServerUplink connection from an actual browser query, which otherwise
@@ -210,7 +235,7 @@ void UTcpLink::DispatchReceived()
 				line.pop_back();
 			ReceiveBuffer.erase(0, pos + 1);
 			if (DebugNet())
-				fprintf(stderr, "[Net] %s TcpLink firing ReceivedLine: \"%s\"\n", ObjLabel(this).c_str(), line.c_str());
+				fprintf(stderr, "[Net] %s TcpLink firing ReceivedLine: \"%s\"\n", ObjLabel(this).c_str(), EscapeForLog(line).c_str());
 			CallEvent(this, EventName::ReceivedLine, { ExpressionValue::StringValue(line) });
 		}
 		DataPending() = ReceiveBuffer.empty() ? 0 : 1;
@@ -223,7 +248,7 @@ void UTcpLink::DispatchReceived()
 			ReceiveBuffer.clear();
 			DataPending() = 0;
 			if (DebugNet())
-				fprintf(stderr, "[Net] %s TcpLink firing ReceivedText: %d bytes\n", ObjLabel(this).c_str(), (int)text.size());
+				fprintf(stderr, "[Net] %s TcpLink firing ReceivedText: %d bytes: \"%s\"\n", ObjLabel(this).c_str(), (int)text.size(), EscapeForLog(text).c_str());
 			CallEvent(this, EventName::ReceivedText, { ExpressionValue::StringValue(text) });
 		}
 	}
@@ -441,6 +466,6 @@ int UTcpLink::SendText(const std::string& Str)
 
 	int result = send(handle, msg.c_str(), (int)msg.size(), 0);
 	if (DebugNet())
-		fprintf(stderr, "[Net] %s TcpLink.SendText(%d bytes) -> %d\n", ObjLabel(this).c_str(), (int)msg.size(), result);
+		fprintf(stderr, "[Net] %s TcpLink.SendText(%d bytes) -> %d: \"%s\"\n", ObjLabel(this).c_str(), (int)msg.size(), result, EscapeForLog(msg).c_str());
 	return result == -1 ? 0 : result;
 }
