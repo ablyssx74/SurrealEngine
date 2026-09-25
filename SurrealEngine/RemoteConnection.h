@@ -12,14 +12,15 @@ typedef int remote_socket_t;
 
 // WIP scaffolding for real multiplayer client-join support (SurrealEngine currently has no
 // implementation of UT99's actual netcode - see Docs/Status.md). This is NOT a general
-// implementation of that protocol yet: it opens a raw UDP socket toward the server, sends a
-// real captured "HELLO" handshake packet, and (once a response arrives) a real captured
-// "NETSPEED"+"LOGIN" reply (see RemoteConnection.cpp for exactly what and why - both are
-// verbatim bytes from a genuine capture, not yet built from scratch). This has been confirmed
-// to elicit a real CHALLENGE response from a real UT99 server. Building arbitrary outgoing
-// packets (e.g. a login with the local player's real name, or a correctly-computed
-// CHALLENGE/RESPONSE pair instead of a stale replayed one) still needs a proper bit-packer and
-// the CHALLENGE->RESPONSE algorithm, neither of which exist yet.
+// implementation of that protocol yet, but it's no longer just replaying captured bytes either:
+// it opens a raw UDP socket, sends a captured "HELLO" packet (the one case - a brand new channel
+// opening - the reverse-engineered bit format doesn't fully cover yet), then parses the server's
+// real CHALLENGE response and replies with a NETSPEED+LOGIN packet built from scratch by a small
+// bit-packer, using a RESPONSE value actually computed from the server's challenge (see
+// RemoteConnection.cpp for the packet/bunch format and the ChallengeResponse formula, both
+// reverse-engineered and confirmed against a live UT99 server this session). Still missing: a
+// real player name/class instead of the placeholder "TR30"/SkeletalChars.WarBoss, package
+// validation and map sync, and everything from actor replication onward.
 class RemoteConnection
 {
 public:

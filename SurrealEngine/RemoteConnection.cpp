@@ -4,6 +4,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cstdint>
+#include <vector>
+#include <string>
 
 #ifdef WIN32
 #include <WinSock2.h>
@@ -28,6 +31,247 @@ namespace
 	{
 		static const bool debugNet = std::getenv("SE_DEBUG_NET") != nullptr;
 		return debugNet;
+	}
+
+	// LSB-first bit writer/reader matching UE1's wire format. Reverse-engineered this session
+	// from a genuine Wireshark capture of a real UT99-for-Linux client joining a real UT99-for-
+	// Linux server, then cross-validated by re-encoding a captured packet from scratch and
+	// getting an exact byte-for-byte match, and separately by successfully parsing a live
+	// server's real response during testing. Only covers what's needed for a reliable,
+	// already-open control-channel bunch (what HELLO's response and our LOGIN reply both are) -
+	// a brand-new channel opening (bOpen=1, like our own HELLO) needs one more bit whose exact
+	// meaning isn't nailed down yet, which is why Connect() below still replays a captured HELLO
+	// packet instead of building one with this.
+	class BitWriter
+	{
+	public:
+		void WriteBit(int bit)
+		{
+			if (bitPos % 8 == 0)
+				bytes.push_back(0);
+			if (bit)
+				bytes.back() |= (uint8_t)(1 << (bitPos % 8));
+			bitPos++;
+		}
+
+		void WriteBits(uint32_t value, int count)
+		{
+			for (int i = 0; i < count; i++)
+				WriteBit((value >> i) & 1);
+		}
+
+		// Epic's classic "compact index" variable-length integer, as used throughout Unreal's
+		// serialization: byte 0 holds a sign bit (always 0 here - we never write negative
+		// lengths), a continue bit, and 6 magnitude bits; each following byte holds a continue
+		// bit and 7 more magnitude bits.
+		void WriteCompactIndex(uint32_t value)
+		{
+			uint32_t v = value;
+			uint32_t low6 = v & 0x3F;
+			v >>= 6;
+			bool cont = v != 0;
+			WriteBits(low6 | (cont ? 0x40u : 0u), 8);
+			while (cont)
+			{
+				uint32_t low7 = v & 0x7F;
+				v >>= 7;
+				cont = v != 0;
+				WriteBits(low7 | (cont ? 0x80u : 0u), 8);
+			}
+		}
+
+		// FString wire format: a compact-index length (character count including the null
+		// terminator), the raw ANSI bytes, then the null terminator.
+		void WriteString(const std::string& s)
+		{
+			WriteCompactIndex((uint32_t)s.size() + 1);
+			for (unsigned char c : s)
+				WriteBits(c, 8);
+			WriteBits(0, 8);
+		}
+
+		// Appends another writer's bits verbatim - used to splice a bunch's already-serialized
+		// content (built separately so its byte length is known before the bunch header, which
+		// needs that length, is written) into the outer packet stream.
+		void AppendBits(const BitWriter& other)
+		{
+			for (int i = 0; i < other.bitPos; i++)
+				WriteBit((other.bytes[i / 8] >> (i % 8)) & 1);
+		}
+
+		int GetBitCount() const { return bitPos; }
+
+		// Writes the packet trailer bit and pads to a byte boundary, then returns the bytes.
+		std::vector<uint8_t> Finish()
+		{
+			WriteBit(1);
+			while (bitPos % 8 != 0)
+				WriteBit(0);
+			return bytes;
+		}
+
+	private:
+		std::vector<uint8_t> bytes;
+		int bitPos = 0;
+	};
+
+	class BitReader
+	{
+	public:
+		BitReader(const uint8_t* data, int sizeBytes) : data(data), sizeBits(sizeBytes * 8) {}
+
+		int RemainingBits() const { return sizeBits - bitPos; }
+
+		int ReadBit()
+		{
+			if (bitPos >= sizeBits)
+				return 0;
+			int bit = (data[bitPos / 8] >> (bitPos % 8)) & 1;
+			bitPos++;
+			return bit;
+		}
+
+		uint32_t ReadBits(int count)
+		{
+			uint32_t value = 0;
+			for (int i = 0; i < count; i++)
+				value |= (uint32_t)ReadBit() << i;
+			return value;
+		}
+
+		uint32_t ReadCompactIndex()
+		{
+			uint32_t b0 = ReadBits(8);
+			uint32_t value = b0 & 0x3F;
+			int shift = 6;
+			bool cont = ((b0 >> 6) & 1) != 0;
+			for (int guard = 0; cont && guard < 4; guard++)
+			{
+				uint32_t bN = ReadBits(8);
+				value |= (bN & 0x7F) << shift;
+				shift += 7;
+				cont = ((bN >> 7) & 1) != 0;
+			}
+			return value;
+		}
+
+		std::string ReadString()
+		{
+			uint32_t len = ReadCompactIndex();
+			std::string s;
+			s.reserve(len);
+			for (uint32_t i = 0; i < len; i++)
+			{
+				uint8_t c = (uint8_t)ReadBits(8);
+				if (c != 0)
+					s.push_back((char)c);
+			}
+			return s;
+		}
+
+	private:
+		const uint8_t* data;
+		int sizeBits;
+		int bitPos = 0;
+	};
+
+	// UT99's connection-level challenge/response transform (UGameEngine::ChallengeResponse in
+	// the real engine). Cracked this session by finding a real (CHALLENGE, RESPONSE) pair in a
+	// genuine capture and testing hypotheses against it; the exact formula was then independently
+	// confirmed against a full historical Unreal Engine 1 source tree. Written fresh here (not
+	// copied) purely for UT99 wire-protocol interoperability: without computing the same value a
+	// real client would, a real server rejects the login with "FAILURE CHALLENGE", which is
+	// exactly what happened when this engine sent a stale, unrelated RESPONSE value earlier this
+	// session.
+	int32_t ChallengeResponse(int32_t challenge)
+	{
+		uint32_t c = (uint32_t)challenge;
+		uint32_t result = (c * 237u) ^ 0x93fe92Ceu ^ (uint32_t)(challenge >> 16) ^ (c << 16);
+		return (int32_t)result;
+	}
+
+	// Writes a reliable, already-open control-channel bunch (ChIndex=0) wrapping the given
+	// content, which must already be a whole number of bytes (true for any content built purely
+	// out of WriteString() calls). Caller is responsible for the packet-level header before this
+	// and Finish() after it.
+	void WriteControlBunch(BitWriter& packet, int chSequence, const BitWriter& content)
+	{
+		uint32_t contentBytes = (uint32_t)(content.GetBitCount() / 8);
+		packet.WriteBit(0); // bOpen
+		packet.WriteBit(0); // bClose
+		packet.WriteBit(1); // bReliable
+		packet.WriteBits(0, 10); // ChIndex - the control channel is always index 0
+		packet.WriteBits((uint32_t)chSequence, 10);
+		// The content length is split as quotient*4+remainder across a 2-bit remainder packed
+		// into the top of the channel-type byte and a 7-bit quotient right after it - an unusual
+		// split, but this is exactly what real captured packets do, verified by reconstructing
+		// one from scratch and getting a byte-for-byte match against the original. The 7-bit
+		// quotient caps content at 4*127+3 = 511 bytes, comfortably more than a login message.
+		uint32_t quotient = contentBytes / 4;
+		uint32_t remainder = contentBytes % 4;
+		packet.WriteBits(1u /* CHTYPE_Control */ | (remainder << 6), 8);
+		packet.WriteBits(quotient, 7);
+		packet.AppendBits(content);
+	}
+
+	void WritePacketHeader(BitWriter& packet, int packetId, bool hasAck, int ackPacketId)
+	{
+		packet.WriteBits((uint32_t)packetId, 14);
+		packet.WriteBit(hasAck ? 1 : 0);
+		if (hasAck)
+			packet.WriteBits((uint32_t)ackPacketId, 14);
+	}
+
+	// Builds our reply to the server's CHALLENGE: a NETSPEED message and a LOGIN message (with a
+	// correctly-computed RESPONSE) in one reliable control-channel bunch, exactly mirroring what
+	// a real client sends at this point in the handshake.
+	std::vector<uint8_t> BuildLoginPacket(int packetId, int ackPacketId, int chSequence, int32_t response)
+	{
+		BitWriter content;
+		content.WriteString("NETSPEED 20000");
+		content.WriteString("LOGIN RESPONSE=" + std::to_string(response) +
+			" URL=Index.unr?LAN?Name=TR30?Class=SkeletalChars.WarBoss?team=1?skin=?Face=?Voice=?OverrideClass=?Checksum=NoChecksum");
+
+		BitWriter packet;
+		WritePacketHeader(packet, packetId, true, ackPacketId);
+		WriteControlBunch(packet, chSequence, content);
+		return packet.Finish();
+	}
+
+	// Tries to parse a received packet as a single reliable control-channel bunch containing a
+	// "CHALLENGE VER=... CHALLENGE=<n> ..." message, extracting the server's PacketId (to ack)
+	// and the challenge integer. Returns false for anything that doesn't look like that (an
+	// ack-only packet, a different message, malformed data, etc).
+	bool ParseChallengePacket(const uint8_t* data, int size, int& outServerPacketId, int32_t& outChallenge)
+	{
+		BitReader br(data, size);
+		outServerPacketId = (int)br.ReadBits(14);
+		if (br.ReadBit() != 0) // HasAck
+			br.ReadBits(14); // AckPacketId of our own packet - not needed here
+
+		if (br.RemainingBits() < 23)
+			return false;
+
+		br.ReadBit(); br.ReadBit(); br.ReadBit(); // bOpen/bClose/bReliable - not needed
+		uint32_t chIndex = br.ReadBits(10);
+		br.ReadBits(10); // ChSequence - not needed
+		if (chIndex != 0)
+			return false;
+
+		uint32_t combined = br.ReadBits(8);
+		uint32_t remainder = (combined >> 6) & 0x3;
+		uint32_t quotient = br.ReadBits(7);
+		uint32_t contentBytes = quotient * 4 + remainder;
+		if (contentBytes == 0 || (uint32_t)br.RemainingBits() < contentBytes * 8)
+			return false;
+
+		std::string text = br.ReadString();
+		size_t pos = text.find("CHALLENGE=");
+		if (text.find("CHALLENGE ") != 0 || pos == std::string::npos)
+			return false;
+		pos += strlen("CHALLENGE=");
+		outChallenge = (int32_t)strtol(text.c_str() + pos, nullptr, 10);
+		return true;
 	}
 }
 
@@ -164,38 +408,33 @@ void RemoteConnection::Tick(float elapsed)
 					received, remoteHost.c_str(), remotePort, hex.c_str(), received > shown ? "..." : "");
 			}
 
-			// Second step of the handshake test: once *anything* comes back after our HELLO, reply
-			// with a real captured client's second packet (PacketId=1, acking the server's
-			// PacketId=0 - both true here too, since this is also our second packet acking the
-			// server's first reply) containing "NETSPEED 20000" and a LOGIN control message. This
-			// is, again, verbatim replayed bytes, not something built from our own bit-packer (see
-			// RemoteConnection.h) - notably its "RESPONSE=" value is whatever the real client
-			// computed from *that* session's CHALLENGE, which won't match this server's freshly
-			// generated CHALLENGE. Sending it anyway is a cheap way to find out whether this
-			// server validates RESPONSE at all before we've reverse-engineered how to compute it
-			// correctly - either a WELCOME (or some other clearly-different reaction) or continued
-			// silence is useful new information either way.
+			// Second step of the handshake: once the server's CHALLENGE arrives, reply with a real
+			// NETSPEED+LOGIN message built by our own bit-packer, using a RESPONSE value we
+			// actually compute from the server's challenge (see ChallengeResponse above) instead
+			// of a stale replayed one - which a real server correctly rejects with "FAILURE
+			// CHALLENGE", as confirmed earlier this session.
 			if (!sentLoginReply)
 			{
-				sentLoginReply = true;
-				static const uint8_t loginPacket[169] = {
-					0x01, 0x40, 0x00, 0x80, 0x00, 0x08, 0x10, 0x80, 0x7a, 0x70, 0x2a, 0xa2, 0x9a, 0x82,
-					0x2a, 0x2a, 0x22, 0x02, 0x91, 0x81, 0x81, 0x81, 0x81, 0x01, 0x70, 0x12, 0x60, 0x7a,
-					0x3a, 0x4a, 0x72, 0x02, 0x91, 0x2a, 0x9a, 0x82, 0x7a, 0x72, 0x9a, 0x2a, 0xea, 0x69,
-					0x89, 0xc1, 0xa9, 0x89, 0xc9, 0xc1, 0x91, 0xb1, 0x01, 0xa9, 0x92, 0x62, 0xea, 0x49,
-					0x72, 0x23, 0x2b, 0xc3, 0x73, 0xa9, 0x73, 0x93, 0xfb, 0x61, 0x0a, 0x72, 0xfa, 0x71,
-					0x0a, 0x6b, 0x2b, 0xeb, 0xa1, 0x92, 0x9a, 0x81, 0xf9, 0x19, 0x62, 0x0b, 0x9b, 0x9b,
-					0xeb, 0x99, 0x5a, 0x2b, 0x63, 0x2b, 0xa3, 0x0b, 0x63, 0x1b, 0x42, 0x0b, 0x93, 0x9b,
-					0x73, 0xb9, 0x0a, 0x93, 0x13, 0x7a, 0x9b, 0x9b, 0xfb, 0xa1, 0x2b, 0x0b, 0x6b, 0xeb,
-					0x89, 0xf9, 0x99, 0x5b, 0x4b, 0x73, 0xeb, 0xf9, 0x31, 0x0a, 0x1b, 0x2b, 0xeb, 0xf9,
-					0xb1, 0x7a, 0x4b, 0x1b, 0x2b, 0xeb, 0xf9, 0x79, 0xb2, 0x2b, 0x93, 0x93, 0x4b, 0x23,
-					0x2b, 0x1b, 0x62, 0x0b, 0x9b, 0x9b, 0xeb, 0xf9, 0x19, 0x42, 0x2b, 0x1b, 0x5b, 0x9b,
-					0xab, 0x6b, 0xeb, 0x71, 0x7a, 0x1b, 0x42, 0x2b, 0x1b, 0x5b, 0x9b, 0xab, 0x6b, 0x03,
-					0x08
-				};
-				int sent = send(handle, (const char*)loginPacket, sizeof(loginPacket), 0);
-				if (DebugNet())
-					fprintf(stderr, "[Net] RemoteConnection: sent %d-byte NETSPEED+LOGIN reply (replayed from a real capture, stale RESPONSE value) -> %d\n", (int)sizeof(loginPacket), sent);
+				int serverPacketId = 0;
+				int32_t challenge = 0;
+				if (ParseChallengePacket((const uint8_t*)buffer, received, serverPacketId, challenge))
+				{
+					sentLoginReply = true;
+					int32_t response = ChallengeResponse(challenge);
+					if (DebugNet())
+						fprintf(stderr, "[Net] RemoteConnection: parsed CHALLENGE=%d from server packet %d, computed RESPONSE=%d\n", challenge, serverPacketId, response);
+
+					// Our packet 0 was the HELLO, so this is packet 1; the control channel's
+					// first reliable bunch was HELLO (ChSequence=1), so this is ChSequence=2.
+					std::vector<uint8_t> loginPacket = BuildLoginPacket(1, serverPacketId, 2, response);
+					int sent = send(handle, (const char*)loginPacket.data(), (int)loginPacket.size(), 0);
+					if (DebugNet())
+						fprintf(stderr, "[Net] RemoteConnection: sent %d-byte NETSPEED+LOGIN reply (built with a real computed RESPONSE) -> %d\n", (int)loginPacket.size(), sent);
+				}
+				else if (DebugNet())
+				{
+					fprintf(stderr, "[Net] RemoteConnection: received data didn't parse as a CHALLENGE packet - not replying yet\n");
+				}
 			}
 			continue;
 		}
