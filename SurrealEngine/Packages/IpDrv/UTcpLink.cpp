@@ -80,9 +80,16 @@ namespace
 
 	static std::string AddrToString(const IpAddr& addr)
 	{
+		// Bug: this applied ntohs() to addr.Port, which is wrong for every IpAddr this is actually
+		// called on here (Open()'s Addr parameter and RemoteAddr(), which is just a copy of it) -
+		// confirmed via SE_DEBUG_NET that script (UBrowserGSpyLink, UTBrowserUpdateServerLink) sets
+		// Addr.Port to a plain, unswapped decimal port number (e.g. 28900, 80) before calling Open(),
+		// not a pre-swapped network-byte-order value. Applying ntohs() to an already-host-order value
+		// just re-mangles it for display (see the matching real fix in Open() itself, which was
+		// missing the swap where it actually matters: the live connect() call).
 		uint32_t a = ntohl((uint32_t)addr.Addr);
 		char buf[32];
-		snprintf(buf, sizeof(buf), "%u.%u.%u.%u:%u", (a >> 24) & 0xff, (a >> 16) & 0xff, (a >> 8) & 0xff, a & 0xff, ntohs(addr.Port));
+		snprintf(buf, sizeof(buf), "%u.%u.%u.%u:%u", (a >> 24) & 0xff, (a >> 16) & 0xff, (a >> 8) & 0xff, a & 0xff, (unsigned)addr.Port);
 		return buf;
 	}
 
@@ -271,6 +278,39 @@ int UTcpLink::BindPort(int Port, bool bUseNextAvailable)
 		return ntohs(addr.sin_port);
 	}
 
+	// Bug: script almost never actually passes bUseNextAvailable=true (confirmed via
+	// SE_DEBUG_NET: UBrowserGSpyLink/UTBrowserUpdateServerLink both just call bare BindPort(),
+	// requesting the same fixed port - normally 7777, the default local game port - every time),
+	// so every simultaneously-open link past the very first one used to permanently fail to bind
+	// at all and never even attempt to connect. This link is only ever used for outbound
+	// connections - Listen() is unimplemented (hosting isn't supported), so nothing is ever
+	// listening on this local port - meaning which local port gets used doesn't functionally
+	// matter. Fall back to "any free port" rather than giving up, so more than one simultaneous
+	// master-browser query (or any other outbound link) can actually proceed.
+	if (Port != 0)
+	{
+		sockaddr_in addr;
+		memset(&addr, 0, sizeof(sockaddr_in));
+		addr.sin_family = AF_INET;
+		addr.sin_addr.s_addr = INADDR_ANY;
+		addr.sin_port = 0;
+
+		if (bind(handle, (const sockaddr*)&addr, sizeof(sockaddr_in)) == 0)
+		{
+#ifdef WIN32
+			int size = sizeof(sockaddr_in);
+#else
+			socklen_t size = sizeof(sockaddr_in);
+#endif
+			if (getsockname(handle, (sockaddr*)&addr, &size) == 0)
+			{
+				if (DebugNet())
+					fprintf(stderr, "[Net] %s TcpLink.BindPort: requested port %d unavailable, fell back to port %d\n", ObjLabel(this).c_str(), Port, ntohs(addr.sin_port));
+				return ntohs(addr.sin_port);
+			}
+		}
+	}
+
 	return 0;
 }
 
@@ -297,7 +337,12 @@ bool UTcpLink::Open(const IpAddr& Addr)
 	memset(&addr, 0, sizeof(sockaddr_in));
 	addr.sin_family = AF_INET;
 	addr.sin_addr.s_addr = Addr.Addr;
-	addr.sin_port = Addr.Port;
+	// Bug: this copied Addr.Port straight into sin_port with no byte-order conversion. Confirmed
+	// via SE_DEBUG_NET that script hands this a plain host-order decimal port (e.g. 28900 for
+	// UBrowserGSpyLink, 80 for UTBrowserUpdateServerLink), not a pre-swapped network-byte-order
+	// value - sin_port needs actual network byte order, so every connection here was silently
+	// targeting a byte-swapped port (28900 -> 58480, 80 -> 20480) instead of the intended one.
+	addr.sin_port = htons((uint16_t)Addr.Port);
 
 	int result = connect(handle, (const sockaddr*)&addr, sizeof(sockaddr_in));
 	if (result == -1 && !ConnectInProgress())
