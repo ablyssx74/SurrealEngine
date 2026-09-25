@@ -316,7 +316,15 @@ void Engine::Run()
 			// SE_DEBUG_NET and a packet capture, as a first step toward the real thing.
 			LogMessage("Attempting to connect to " + ClientTravelInfo.URL.Host + ":" + std::to_string(ClientTravelInfo.URL.Port) + " (multiplayer join is not implemented yet)");
 			remoteConnection.Connect(ClientTravelInfo.URL.Host, ClientTravelInfo.URL.Port);
-			ClientTravelInfo.URL = UnrealURL();
+			// Bug: UnrealURL()'s default constructor doesn't give an empty URL - its Map member
+			// defaults to "Index.unr" (see UnrealURL.h), a map this game doesn't ship. Assigning
+			// that here meant the very next frame's "if (!ClientTravelInfo.URL.Map.empty())" check
+			// above saw a non-empty Map again and tried to load it, crashing with "Could not open
+			// .../Maps/Index.unr". Clear() correctly empties Map (unlike the default constructor)
+			// but doesn't touch Host, so it's cleared explicitly too - otherwise this branch would
+			// keep re-firing (reconnecting every frame) instead of running once per join attempt.
+			ClientTravelInfo.URL.Clear();
+			ClientTravelInfo.URL.Host.clear();
 		}
 	}
 
