@@ -12,15 +12,17 @@ typedef int remote_socket_t;
 
 // WIP scaffolding for real multiplayer client-join support (SurrealEngine currently has no
 // implementation of UT99's actual netcode - see Docs/Status.md). This is NOT a general
-// implementation of that protocol yet, but it's no longer just replaying captured bytes either:
-// it opens a raw UDP socket, sends a captured "HELLO" packet (the one case - a brand new channel
-// opening - the reverse-engineered bit format doesn't fully cover yet), then parses the server's
-// real CHALLENGE response and replies with a NETSPEED+LOGIN packet built from scratch by a small
-// bit-packer, using a RESPONSE value actually computed from the server's challenge (see
-// RemoteConnection.cpp for the packet/bunch format and the ChallengeResponse formula, both
-// reverse-engineered and confirmed against a live UT99 server this session). Still missing: a
-// real player name/class instead of the placeholder "TR30"/SkeletalChars.WarBoss, package
-// validation and map sync, and everything from actor replication onward.
+// implementation of that protocol yet: it opens a raw UDP socket and drives the login handshake
+// (HELLO -> CHALLENGE -> NETSPEED+LOGIN -> package list -> WELCOME -> JOIN) using a real,
+// from-scratch implementation of UE1's bit-packed wire format (see RemoteConnection.cpp for the
+// packet/bunch structure and the ChallengeResponse formula - both reverse-engineered from genuine
+// packet captures and confirmed against a live UT99 server, then cross-checked against real
+// 1997-1999 Epic Games UT99 source files for the exact field layout). Received packets are parsed
+// structurally (every ack and bunch entry, not just the control channel), but only control-channel
+// (ChType=Control) content is currently interpreted; actor/file channel bunches - real gameplay
+// state replication, which starts flowing immediately after JOIN - are recognized but not
+// decoded. Still missing: a real player name/class instead of the placeholder
+// "TR30"/SkeletalChars.WarBoss, package validation and map sync, and actor property replication.
 class RemoteConnection
 {
 public:

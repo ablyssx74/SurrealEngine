@@ -33,15 +33,13 @@ namespace
 		return debugNet;
 	}
 
-	// LSB-first bit writer/reader matching UE1's wire format. Reverse-engineered this session
-	// from a genuine Wireshark capture of a real UT99-for-Linux client joining a real UT99-for-
-	// Linux server, then cross-validated by re-encoding a captured packet from scratch and
-	// getting an exact byte-for-byte match, and separately by successfully parsing a live
-	// server's real response during testing. Only covers what's needed for a reliable,
-	// already-open control-channel bunch (what HELLO's response and our LOGIN reply both are) -
-	// a brand-new channel opening (bOpen=1, like our own HELLO) needs one more bit whose exact
-	// meaning isn't nailed down yet, which is why Connect() below still replays a captured HELLO
-	// packet instead of building one with this.
+	// LSB-first bit writer/reader matching UE1's wire format, reverse-engineered this session from
+	// genuine Wireshark captures of a real UT99-for-Linux client talking to a real UT99-for-Linux
+	// server, cross-checked against a set of real 1997-1999 Epic Games UT99 engine source files
+	// (UnConn.cpp/UnChan.cpp/UnBunch.cpp) obtained separately, and validated by re-encoding
+	// captured packets from scratch and getting exact byte-for-byte matches (including the bOpen=1
+	// "new channel" case, previously unsolved and replayed verbatim from a capture - now built
+	// fresh like everything else). Written fresh here; never copied from Epic's source text.
 	class BitWriter
 	{
 	public:
@@ -61,9 +59,9 @@ namespace
 		}
 
 		// Epic's classic "compact index" variable-length integer, as used throughout Unreal's
-		// serialization: byte 0 holds a sign bit (always 0 here - we never write negative
-		// lengths), a continue bit, and 6 magnitude bits; each following byte holds a continue
-		// bit and 7 more magnitude bits.
+		// serialization: byte 0 holds 6 magnitude bits then a continue bit then a sign bit (all
+		// LSB-first); each following byte holds 7 more magnitude bits then a continue bit. We only
+		// ever write positive lengths here, so the sign bit is always 0.
 		void WriteCompactIndex(uint32_t value)
 		{
 			uint32_t v = value;
@@ -91,7 +89,7 @@ namespace
 		}
 
 		// Appends another writer's bits verbatim - used to splice a bunch's already-serialized
-		// content (built separately so its byte length is known before the bunch header, which
+		// content (built separately so its bit length is known before the bunch header, which
 		// needs that length, is written) into the outer packet stream.
 		void AppendBits(const BitWriter& other)
 		{
@@ -176,24 +174,45 @@ namespace
 		int bitPos = 0;
 	};
 
-	// Every packet, whatever it contains, starts with a 14-bit PacketId - used to ack whatever
-	// the server just sent us, independent of whether we understand its contents.
-	int ReadPacketId(const uint8_t* data, int size)
+	// UE1 channel types (EChannelType in the real engine). Only Control is used by anything this
+	// code builds; Actor/File are recognized when parsing so logging can say what a channel is.
+	enum EChannelType
 	{
-		if (size < 2)
-			return -1;
-		BitReader br(data, size);
-		return (int)br.ReadBits(14);
-	}
+		CHTYPE_None = 0,
+		CHTYPE_Control = 1,
+		CHTYPE_Actor = 2,
+		CHTYPE_File = 3,
+	};
 
-	// UT99's connection-level challenge/response transform (UGameEngine::ChallengeResponse in
-	// the real engine). Cracked this session by finding a real (CHALLENGE, RESPONSE) pair in a
-	// genuine capture and testing hypotheses against it; the exact formula was then independently
-	// confirmed against a full historical Unreal Engine 1 source tree. Written fresh here (not
-	// copied) purely for UT99 wire-protocol interoperability: without computing the same value a
-	// real client would, a real server rejects the login with "FAILURE CHALLENGE", which is
-	// exactly what happened when this engine sent a stale, unrelated RESPONSE value earlier this
-	// session.
+	// Field widths for UE1's universal "ReadInt(Max)/WriteInt(Max)" bounded-integer primitive.
+	// Confirmed this session against a real 1997-1999 UT99 engine source excerpt: it serializes a
+	// value in [0,Max) using a fixed number of bits equal to the position of the highest bit Max-1
+	// needs (i.e. it writes one bit per doubling of a mask starting at 1 until the mask reaches or
+	// exceeds Max) - NOT a value-dependent variable-length scheme like the compact index above.
+	// Each width below was independently confirmed empirically against real captured traffic
+	// before the source was available, then matched exactly once the source explained why:
+	//   MAX_PACKETID   = 16384  -> 14 bits (PacketId, AckPacketId)
+	//   MAX_CHANNELS   =  1024  -> 10 bits (ChIndex)
+	//   MAX_CHSEQUENCE =  1024  -> 10 bits (ChSequence)
+	//   CHTYPE_MAX     =     8  ->  3 bits (ChType) - inferred from real traffic; only values 0-3
+	//   are used in practice, but a 2-bit field would misalign nearly every bunch, and testing
+	//   against 265+ real captured packets spanning the full handshake through a live actor-
+	//   replication burst only decodes cleanly (no overflow/truncation anywhere) with 3 bits.
+	//   MaxPacket*8    =  4096  -> 12 bits (BunchDataBits, a bit count not a byte count) - MaxPacket
+	//   itself (512 bytes) matches the largest packets ever observed in any real capture (~505-510
+	//   bytes of payload, consistent with a 512-byte cap minus header/trailer overhead).
+	constexpr int PACKETID_BITS = 14;
+	constexpr int CHINDEX_BITS = 10;
+	constexpr int CHSEQUENCE_BITS = 10;
+	constexpr int CHTYPE_BITS = 3;
+	constexpr int BUNCH_LENGTH_BITS = 12;
+
+	// UT99's connection-level challenge/response transform (UGameEngine::ChallengeResponse in the
+	// real engine). Cracked this session by finding a real (CHALLENGE, RESPONSE) pair in a genuine
+	// capture and testing hypotheses against it; the exact formula was then independently
+	// confirmed against a historical Unreal Engine 1 source tree. Written fresh here (not copied)
+	// purely for UT99 wire-protocol interoperability: without computing the same value a real
+	// client would, a real server rejects the login with "FAILURE CHALLENGE".
 	int32_t ChallengeResponse(int32_t challenge)
 	{
 		uint32_t c = (uint32_t)challenge;
@@ -201,52 +220,77 @@ namespace
 		return (int32_t)result;
 	}
 
-	// Writes a reliable, already-open control-channel bunch (ChIndex=0) wrapping the given
-	// content, which must already be a whole number of bytes (true for any content built purely
-	// out of WriteString() calls). Caller is responsible for the packet-level header before this
-	// and Finish() after it.
-	void WriteControlBunch(BitWriter& packet, int chSequence, const BitWriter& content)
+	// Writes one packet-level "entry": a bunch. Every packet is PacketId followed by a sequence of
+	// self-describing entries - each starts with an IsAck bit; IsAck=1 means a plain
+	// acknowledgement (just an AckPacketId), IsAck=0 means a full bunch as written here. Confirmed
+	// against real UT99 source: bControl (=bOpen||bClose) gates whether bOpen/bClose follow;
+	// bReliable gates whether ChSequence follows; (bReliable||bOpen) gates whether ChType follows.
+	void WriteBunch(BitWriter& packet, bool bOpen, bool bClose, bool bReliable, int chIndex, int chType, int chSequence, const BitWriter& content)
 	{
-		uint32_t contentBytes = (uint32_t)(content.GetBitCount() / 8);
-		packet.WriteBit(0); // bOpen
-		packet.WriteBit(0); // bClose
-		packet.WriteBit(1); // bReliable
-		packet.WriteBits(0, 10); // ChIndex - the control channel is always index 0
-		packet.WriteBits((uint32_t)chSequence, 10);
-		// The content length is split as quotient*4+remainder across a 2-bit remainder packed
-		// into the top of the channel-type byte and a 7-bit quotient right after it - an unusual
-		// split, but this is exactly what real captured packets do, verified by reconstructing
-		// one from scratch and getting a byte-for-byte match against the original. The 7-bit
-		// quotient caps content at 4*127+3 = 511 bytes, comfortably more than a login message.
-		uint32_t quotient = contentBytes / 4;
-		uint32_t remainder = contentBytes % 4;
-		packet.WriteBits(1u /* CHTYPE_Control */ | (remainder << 6), 8);
-		packet.WriteBits(quotient, 7);
+		packet.WriteBit(0); // IsAck = 0: this entry is a bunch, not an ack
+		bool bControl = bOpen || bClose;
+		packet.WriteBit(bControl ? 1 : 0);
+		if (bControl)
+		{
+			packet.WriteBit(bOpen ? 1 : 0);
+			packet.WriteBit(bClose ? 1 : 0);
+		}
+		packet.WriteBit(bReliable ? 1 : 0);
+		packet.WriteBits((uint32_t)chIndex, CHINDEX_BITS);
+		if (bReliable)
+			packet.WriteBits((uint32_t)chSequence, CHSEQUENCE_BITS);
+		if (bReliable || bOpen)
+			packet.WriteBits((uint32_t)chType, CHTYPE_BITS);
+		packet.WriteBits((uint32_t)content.GetBitCount(), BUNCH_LENGTH_BITS);
 		packet.AppendBits(content);
 	}
 
-	void WritePacketHeader(BitWriter& packet, int packetId, bool hasAck, int ackPacketId)
+	// Writes a plain-ack entry: IsAck=1 followed by the PacketId being acknowledged. A single
+	// packet can carry any number of these (and any number of bunches) - real servers do exactly
+	// that, e.g. acking eight outstanding packets at once in a single reply.
+	void WriteAckEntry(BitWriter& packet, int ackPacketId)
 	{
-		packet.WriteBits((uint32_t)packetId, 14);
-		packet.WriteBit(hasAck ? 1 : 0);
-		if (hasAck)
-			packet.WriteBits((uint32_t)ackPacketId, 14);
+		packet.WriteBit(1);
+		packet.WriteBits((uint32_t)ackPacketId, PACKETID_BITS);
 	}
 
-	// An ack carrying no bunch data at all - what a real client sends when it has nothing new to
-	// say but needs the server to know it's still there and which packets have arrived. Matches
-	// the shape of real ack-only packets seen in the original capture (PacketId+HasAck+
-	// AckPacketId, then just the trailer bit and padding).
+	// A reliable, already-open (bOpen=bClose=0) control-channel (ChIndex=0, ChType=Control) bunch
+	// carrying plain text content - the shape of every message this client sends after HELLO.
+	void WriteControlBunch(BitWriter& packet, int chSequence, const BitWriter& content)
+	{
+		WriteBunch(packet, /*bOpen=*/false, /*bClose=*/false, /*bReliable=*/true, /*chIndex=*/0, CHTYPE_Control, chSequence, content);
+	}
+
+	// An ack-only packet: PacketId followed by nothing but one ack entry. What a real client sends
+	// when it has nothing new to say but needs the server to know it's still there and which
+	// packet just arrived.
 	std::vector<uint8_t> BuildAckPacket(int packetId, int ackPacketId)
 	{
 		BitWriter packet;
-		WritePacketHeader(packet, packetId, true, ackPacketId);
+		packet.WriteBits((uint32_t)packetId, PACKETID_BITS);
+		WriteAckEntry(packet, ackPacketId);
+		return packet.Finish();
+	}
+
+	// The very first packet a client ever sends: PacketId=0, no ack yet, a single reliable bunch
+	// that *opens* the control channel (bOpen=1, ChSequence=1) containing the HELLO handshake
+	// message. Building this from scratch (rather than replaying captured bytes, as earlier this
+	// session) was verified by re-encoding a real captured HELLO packet and getting an exact
+	// byte-for-byte match.
+	std::vector<uint8_t> BuildHelloPacket()
+	{
+		BitWriter content;
+		content.WriteString("HELLO REV=101 MINVER=432 VER=469");
+
+		BitWriter packet;
+		packet.WriteBits(0, PACKETID_BITS);
+		WriteBunch(packet, /*bOpen=*/true, /*bClose=*/false, /*bReliable=*/true, /*chIndex=*/0, CHTYPE_Control, /*chSequence=*/1, content);
 		return packet.Finish();
 	}
 
 	// Builds our reply to the server's CHALLENGE: a NETSPEED message and a LOGIN message (with a
-	// correctly-computed RESPONSE) in one reliable control-channel bunch, exactly mirroring what
-	// a real client sends at this point in the handshake.
+	// correctly-computed RESPONSE) in one reliable control-channel bunch, exactly mirroring what a
+	// real client sends at this point in the handshake.
 	std::vector<uint8_t> BuildLoginPacket(int packetId, int ackPacketId, int chSequence, int32_t response)
 	{
 		BitWriter content;
@@ -255,110 +299,10 @@ namespace
 			" URL=Index.unr?LAN?Name=TR30?Class=SkeletalChars.WarBoss?team=1?skin=?Face=?Voice=?OverrideClass=?Checksum=NoChecksum");
 
 		BitWriter packet;
-		WritePacketHeader(packet, packetId, true, ackPacketId);
+		packet.WriteBits((uint32_t)packetId, PACKETID_BITS);
+		WriteAckEntry(packet, ackPacketId);
 		WriteControlBunch(packet, chSequence, content);
 		return packet.Finish();
-	}
-
-	// Tries to parse a received packet as a single reliable control-channel bunch containing a
-	// "CHALLENGE VER=... CHALLENGE=<n> ..." message, extracting the server's PacketId (to ack)
-	// and the challenge integer. Returns false for anything that doesn't look like that (an
-	// ack-only packet, a different message, malformed data, etc).
-	bool ParseChallengePacket(const uint8_t* data, int size, int& outServerPacketId, int32_t& outChallenge)
-	{
-		BitReader br(data, size);
-		outServerPacketId = (int)br.ReadBits(14);
-		if (br.ReadBit() != 0) // HasAck
-			br.ReadBits(14); // AckPacketId of our own packet - not needed here
-
-		if (br.RemainingBits() < 23)
-			return false;
-
-		br.ReadBit(); br.ReadBit(); br.ReadBit(); // bOpen/bClose/bReliable - not needed
-		uint32_t chIndex = br.ReadBits(10);
-		br.ReadBits(10); // ChSequence - not needed
-		if (chIndex != 0)
-			return false;
-
-		uint32_t combined = br.ReadBits(8);
-		uint32_t remainder = (combined >> 6) & 0x3;
-		uint32_t quotient = br.ReadBits(7);
-		uint32_t contentBytes = quotient * 4 + remainder;
-		if (contentBytes == 0 || (uint32_t)br.RemainingBits() < contentBytes * 8)
-			return false;
-
-		std::string text = br.ReadString();
-		size_t pos = text.find("CHALLENGE=");
-		if (text.find("CHALLENGE ") != 0 || pos == std::string::npos)
-			return false;
-		pos += strlen("CHALLENGE=");
-		outChallenge = (int32_t)strtol(text.c_str() + pos, nullptr, 10);
-		return true;
-	}
-
-	// Scans every possible bit offset in a packet for a compact-index-length-prefixed printable
-	// ASCII string starting with the given prefix. This doesn't rely on understanding the
-	// packet/bunch header at all - it's the same brute-force technique originally used to
-	// reverse-engineer this protocol from captures - so unlike a structured parse (tried first;
-	// see the session notes), it works even for bunch types whose exact header encoding isn't
-	// understood: real testing found the package-list/WELCOME traffic uses a still-unexplained
-	// "irregular flags" bunch variant (also seen for the multi-string package-list bunches
-	// themselves) that the normal 3-flags+ChIndex+ChSequence+ChType+length model doesn't decode
-	// correctly, silently breaking a structured search for WELCOME. Confirmed against the real
-	// captured packet that contains WELCOME in the original session's capture.
-	bool FindStringWithPrefix(const uint8_t* data, int size, const std::string& prefix, std::string& outText)
-	{
-		int totalBits = size * 8;
-		for (int bitoff = 0; bitoff + 8 <= totalBits; bitoff++)
-		{
-			// A fresh reader byte-aligned to bitoff, with only the sub-byte remainder skipped -
-			// avoids overflowing ReadBits' 32-bit accumulator for a large bitoff.
-			int byteOff = bitoff / 8;
-			int subBit = bitoff % 8;
-			BitReader br(data + byteOff, size - byteOff);
-			if (subBit)
-				br.ReadBits(subBit);
-
-			uint32_t b0 = br.ReadBits(8);
-			uint32_t val = b0 & 0x3F;
-			int shift = 6;
-			bool cont = ((b0 >> 6) & 1) != 0;
-			bool ok = true;
-			for (int guard = 0; cont && guard < 4; guard++)
-			{
-				if (br.RemainingBits() < 8) { ok = false; break; }
-				uint32_t bN = br.ReadBits(8);
-				val |= (bN & 0x7F) << shift;
-				shift += 7;
-				cont = ((bN >> 7) & 1) != 0;
-			}
-			if (!ok || val < prefix.size() + 1 || val > 200)
-				continue;
-			if ((uint32_t)br.RemainingBits() < val * 8)
-				continue;
-
-			std::string text;
-			bool allPrintable = true;
-			for (uint32_t i = 0; i < val; i++)
-			{
-				uint8_t c = (uint8_t)br.ReadBits(8);
-				if (i == val - 1)
-				{
-					if (c != 0) allPrintable = false; // must end in a null terminator
-				}
-				else
-				{
-					if (c < 0x20 || c > 0x7e) allPrintable = false;
-					else text.push_back((char)c);
-				}
-			}
-			if (allPrintable && text.size() >= prefix.size() && text.compare(0, prefix.size(), prefix) == 0)
-			{
-				outText = text;
-				return true;
-			}
-		}
-		return false;
 	}
 
 	// Builds our reply once the server's WELCOME arrives: a "JOIN" message in a reliable
@@ -369,9 +313,144 @@ namespace
 		content.WriteString("JOIN");
 
 		BitWriter packet;
-		WritePacketHeader(packet, packetId, true, ackPacketId);
+		packet.WriteBits((uint32_t)packetId, PACKETID_BITS);
+		WriteAckEntry(packet, ackPacketId);
 		WriteControlBunch(packet, chSequence, content);
 		return packet.Finish();
+	}
+
+	// A single decoded bunch entry from a received packet. contentBitOffset/contentBits describe
+	// the bunch's payload as a span of bits within the original packet buffer (not copied out),
+	// since only control-channel (ChType==Control) content is ever interpreted as text right now -
+	// actor/file channel content (real gameplay state replication) is a separately-scoped piece of
+	// work that doesn't exist yet.
+	struct ParsedBunch
+	{
+		bool bOpen = false, bClose = false, bReliable = false;
+		int chIndex = 0;
+		int chType = CHTYPE_None;
+		int chSequence = 0;
+		int contentBitOffset = 0;
+		int contentBits = 0;
+	};
+
+	struct ParsedPacket
+	{
+		bool valid = false;
+		int packetId = -1;
+		std::vector<int> acks;
+		std::vector<ParsedBunch> bunches;
+	};
+
+	// Decodes a received packet's PacketId and its full sequence of self-describing entries
+	// (interleaved acks and bunches, in whatever order and quantity the sender chose - real
+	// servers send anywhere from zero to a dozen+ of each in a single packet). Stops cleanly at
+	// the packet's trailer bit: the last "entry" the loop reads is always that lone trailer bit
+	// misread as a bogus IsAck=1 with too few bits left for a real AckPacketId to follow, which is
+	// how the loop knows to stop (the trailer only pads to the next byte boundary, at most 7 bits,
+	// always less than the 14 a real ack needs, so this never misfires on real data - confirmed
+	// against 265+ real captured packets spanning the full handshake through a live post-JOIN
+	// actor-replication burst, all of which decode with zero overflow/truncation anomalies).
+	ParsedPacket ParsePacket(const uint8_t* data, int size)
+	{
+		ParsedPacket result;
+		BitReader br(data, size);
+		if (br.RemainingBits() < PACKETID_BITS)
+			return result;
+		result.packetId = (int)br.ReadBits(PACKETID_BITS);
+		result.valid = true;
+
+		while (br.RemainingBits() >= 1)
+		{
+			int isAck = br.ReadBit();
+			if (isAck)
+			{
+				if (br.RemainingBits() < PACKETID_BITS)
+					break; // the packet's trailer bit, not a real ack entry
+				result.acks.push_back((int)br.ReadBits(PACKETID_BITS));
+			}
+			else
+			{
+				if (br.RemainingBits() < 2)
+					break;
+				bool bControl = br.ReadBit() != 0;
+				bool bOpen = false, bClose = false;
+				if (bControl)
+				{
+					if (br.RemainingBits() < 2)
+						break;
+					bOpen = br.ReadBit() != 0;
+					bClose = br.ReadBit() != 0;
+				}
+				if (br.RemainingBits() < 1)
+					break;
+				bool bReliable = br.ReadBit() != 0;
+				if (br.RemainingBits() < CHINDEX_BITS)
+					break;
+				int chIndex = (int)br.ReadBits(CHINDEX_BITS);
+				int chSequence = 0;
+				if (bReliable)
+				{
+					if (br.RemainingBits() < CHSEQUENCE_BITS)
+						break;
+					chSequence = (int)br.ReadBits(CHSEQUENCE_BITS);
+				}
+				int chType = CHTYPE_None;
+				if (bReliable || bOpen)
+				{
+					if (br.RemainingBits() < CHTYPE_BITS)
+						break;
+					chType = (int)br.ReadBits(CHTYPE_BITS);
+				}
+				if (br.RemainingBits() < BUNCH_LENGTH_BITS)
+					break;
+				int contentBits = (int)br.ReadBits(BUNCH_LENGTH_BITS);
+				if (contentBits < 0 || contentBits > br.RemainingBits())
+					break;
+
+				ParsedBunch pb;
+				pb.bOpen = bOpen; pb.bClose = bClose; pb.bReliable = bReliable;
+				pb.chIndex = chIndex; pb.chType = chType; pb.chSequence = chSequence;
+				pb.contentBitOffset = br.GetBitPos();
+				pb.contentBits = contentBits;
+				result.bunches.push_back(pb);
+
+				for (int i = 0; i < contentBits; i++)
+					br.ReadBit();
+			}
+		}
+		return result;
+	}
+
+	// Reads every FString out of a bunch's content span. Safe to call on any bunch (bounded by the
+	// bunch's own declared bit length, so it can't run past its content into whatever follows),
+	// but only meaningful for control-channel bunches - the control channel is nothing but a
+	// reliable ordered stream of these (confirmed this session: multiple Logf()-style messages sit
+	// back-to-back in one bunch's payload with zero framing between them).
+	std::vector<std::string> ReadBunchStrings(const uint8_t* data, int size, const ParsedBunch& bunch)
+	{
+		std::vector<std::string> result;
+		int byteOff = bunch.contentBitOffset / 8;
+		int subBit = bunch.contentBitOffset % 8;
+		if (byteOff >= size)
+			return result;
+
+		BitReader br(data + byteOff, size - byteOff);
+		if (subBit)
+			br.ReadBits(subBit);
+
+		int remaining = bunch.contentBits;
+		while (remaining > 8) // a valid string needs at least a length byte plus a null terminator
+		{
+			int before = br.RemainingBits();
+			std::string s = br.ReadString();
+			int consumed = before - br.RemainingBits();
+			if (consumed <= 0 || consumed > remaining)
+				break;
+			remaining -= consumed;
+			result.push_back(std::move(s));
+		}
+		return result;
 	}
 }
 
@@ -438,21 +517,10 @@ bool RemoteConnection::Connect(const std::string& host, int port)
 	if (DebugNet())
 		fprintf(stderr, "[Net] RemoteConnection: socket ready, target %s:%d\n", host.c_str(), port);
 
-	// Still a captured/replayed packet, not built with our own bit-packer (see WriteControlBunch
-	// et al. above) - unlike every later message, this one opens a brand new channel (bOpen=1),
-	// and that case needs one more header bit whose exact meaning isn't nailed down yet (every
-	// other message reverse-engineered this session continues an already-open channel, so
-	// doesn't need it). These are the literal bytes of a real client's first-ever packet from a
-	// genuine capture: PacketId=0, no ack yet, one reliable control-channel bunch containing
-	// "HELLO REV=101 MINVER=432 VER=469\0" - confirmed working against a live UT99 server.
-	static const uint8_t helloPacket[41] = {
-		0x00, 0x80, 0x05, 0x20, 0x80, 0x40, 0x44, 0x08, 0x52, 0x11, 0x13, 0xd3, 0x13, 0x88, 0x54,
-		0x91, 0x55, 0x4f, 0x0c, 0x4c, 0x0c, 0x48, 0x53, 0x92, 0x93, 0x55, 0x91, 0x54, 0x0f, 0xcd,
-		0x8c, 0x0c, 0x88, 0x55, 0x91, 0x54, 0x0f, 0x8d, 0x4d, 0x0e, 0x40
-	};
-	int sent = send(handle, (const char*)helloPacket, sizeof(helloPacket), 0);
+	std::vector<uint8_t> helloPacket = BuildHelloPacket();
+	int sent = send(handle, (const char*)helloPacket.data(), (int)helloPacket.size(), 0);
 	if (DebugNet())
-		fprintf(stderr, "[Net] RemoteConnection: sent %d-byte HELLO packet (replayed from a real capture) -> %d\n", (int)sizeof(helloPacket), sent);
+		fprintf(stderr, "[Net] RemoteConnection: sent %d-byte HELLO packet -> %d\n", (int)helloPacket.size(), sent);
 
 	return true;
 }
@@ -493,73 +561,87 @@ void RemoteConnection::Tick(float elapsed)
 					received, remoteHost.c_str(), remotePort, hex.c_str(), received > shown ? "..." : "");
 			}
 
-			// Every packet needs to be acked, and - unlike an initial attempt this session -
-			// individually, not just "ack the latest and let it imply everything before that
-			// arrived": acking only the newest PacketId after draining a batch of received
-			// packets left a real server re-sending the exact same reliable bunch content over
-			// and over (verified byte-for-byte identical across repeats), meaning AckPacketId is
-			// evidently a per-packet acknowledgement, not a cumulative one, and the server was
-			// still waiting to hear about the earlier packets in that batch specifically.
-			int packetId = ReadPacketId((const uint8_t*)buffer, received);
+			ParsedPacket packet = ParsePacket((const uint8_t*)buffer, received);
+			if (!packet.valid)
+			{
+				if (DebugNet())
+					fprintf(stderr, "[Net] RemoteConnection: received data too short to contain a PacketId - ignoring\n");
+				continue;
+			}
+			if (DebugNet() && (packet.acks.size() > 1 || packet.bunches.size() > 1))
+				fprintf(stderr, "[Net] RemoteConnection: packet %d carries %d ack(s) and %d bunch(es)\n",
+					packet.packetId, (int)packet.acks.size(), (int)packet.bunches.size());
+
+			// Every packet needs to be acked, and - as found earlier this session - individually,
+			// not just "ack the latest and let it imply everything before that arrived": acking
+			// only the newest PacketId after draining a batch of received packets left a real
+			// server re-sending the exact same reliable bunch content over and over, meaning
+			// AckPacketId is a per-packet acknowledgement, not a cumulative one.
 			bool acked = false;
 
-			// Second step of the handshake: once the server's CHALLENGE arrives, reply with a real
-			// NETSPEED+LOGIN message built by our own bit-packer, using a RESPONSE value we
-			// actually compute from the server's challenge (see ChallengeResponse above) instead
-			// of a stale replayed one - which a real server correctly rejects with "FAILURE
-			// CHALLENGE", as confirmed earlier this session.
-			if (!sentLoginReply)
+			for (const ParsedBunch& bunch : packet.bunches)
 			{
-				int serverPacketId = 0;
-				int32_t challenge = 0;
-				if (ParseChallengePacket((const uint8_t*)buffer, received, serverPacketId, challenge))
-				{
-					sentLoginReply = true;
-					int32_t response = ChallengeResponse(challenge);
-					if (DebugNet())
-						fprintf(stderr, "[Net] RemoteConnection: parsed CHALLENGE=%d from server packet %d, computed RESPONSE=%d\n", challenge, serverPacketId, response);
+				if (bunch.chIndex != 0 || bunch.chType != CHTYPE_Control)
+					continue; // only the control channel (index 0) is understood right now
 
-					// Our packet 0 was the HELLO, so this is packet 1; the control channel's
-					// first reliable bunch was HELLO (ChSequence=1), so this is ChSequence=2.
-					std::vector<uint8_t> loginPacket = BuildLoginPacket(1, serverPacketId, 2, response);
-					int sent = send(handle, (const char*)loginPacket.data(), (int)loginPacket.size(), 0);
-					if (DebugNet())
-						fprintf(stderr, "[Net] RemoteConnection: sent %d-byte NETSPEED+LOGIN reply (built with a real computed RESPONSE) -> %d\n", (int)loginPacket.size(), sent);
-					acked = true; // the login packet above already acks serverPacketId
-				}
-				else if (DebugNet())
+				std::vector<std::string> messages = ReadBunchStrings((const uint8_t*)buffer, received, bunch);
+				for (const std::string& text : messages)
 				{
-					fprintf(stderr, "[Net] RemoteConnection: received data didn't parse as a CHALLENGE packet - not replying yet\n");
+					if (DebugNet())
+						fprintf(stderr, "[Net] RemoteConnection: control message: \"%s\"\n", text.c_str());
+
+					// Second step of the handshake: once the server's CHALLENGE arrives, reply with
+					// a real NETSPEED+LOGIN message, using a RESPONSE value actually computed from
+					// the server's challenge (see ChallengeResponse above) instead of a stale
+					// replayed one - which a real server correctly rejects with "FAILURE CHALLENGE".
+					if (!sentLoginReply && text.rfind("CHALLENGE ", 0) == 0)
+					{
+						size_t pos = text.find("CHALLENGE=", strlen("CHALLENGE "));
+						if (pos != std::string::npos)
+						{
+							pos += strlen("CHALLENGE=");
+							int32_t challenge = (int32_t)strtol(text.c_str() + pos, nullptr, 10);
+							int32_t response = ChallengeResponse(challenge);
+							sentLoginReply = true;
+							if (DebugNet())
+								fprintf(stderr, "[Net] RemoteConnection: parsed CHALLENGE=%d from server packet %d, computed RESPONSE=%d\n", challenge, packet.packetId, response);
+
+							// Our packet 0 was the HELLO, so this is packet 1; the control
+							// channel's first reliable bunch was HELLO (ChSequence=1), so this is
+							// ChSequence=2.
+							std::vector<uint8_t> loginPacket = BuildLoginPacket(1, packet.packetId, 2, response);
+							int sent = send(handle, (const char*)loginPacket.data(), (int)loginPacket.size(), 0);
+							if (DebugNet())
+								fprintf(stderr, "[Net] RemoteConnection: sent %d-byte NETSPEED+LOGIN reply -> %d\n", (int)loginPacket.size(), sent);
+							acked = true; // the login packet above already acks this server packet
+						}
+					}
+					// Third step: once the server's WELCOME arrives (after LOGIN, it sends the
+					// required-package list, then WELCOME), tell it we're entering the game. A real
+					// client's JOIN is what makes the server start spawning actors and replicating
+					// real gameplay state - understanding and applying that (an actor-channel
+					// property decoder) is a much bigger and separately-scoped piece of work that
+					// doesn't exist yet, so for now this just gets the message sent and logs
+					// whatever comes back afterward via the control-message logging above (actor
+					// channel bunches are parsed structurally but not yet interpreted).
+					else if (sentLoginReply && !sentJoin && text.rfind("WELCOME ", 0) == 0)
+					{
+						sentJoin = true;
+						std::vector<uint8_t> joinPacket = BuildJoinPacket(nextOutgoingPacketId++, packet.packetId, nextChSequence++);
+						int sent = send(handle, (const char*)joinPacket.data(), (int)joinPacket.size(), 0);
+						if (DebugNet())
+							fprintf(stderr, "[Net] RemoteConnection: parsed \"%s\", sent %d-byte JOIN reply -> %d\n", text.c_str(), (int)joinPacket.size(), sent);
+						acked = true; // the JOIN packet above already acks this server packet
+					}
 				}
 			}
 
-			// Third step: once the server's WELCOME arrives (after LOGIN, it sends the required-
-			// package list, then WELCOME), tell it we're entering the game. A real client's JOIN
-			// is what makes the server start spawning actors and replicating real gameplay state -
-			// understanding and applying that (a PackageMap/class-index scheme, an actor channel
-			// that can decode property writes) is a much bigger and separately-scoped piece of
-			// work that doesn't exist yet, so for now this just gets the message sent and logs
-			// whatever comes back afterward via the normal receive logging above.
-			if (sentLoginReply && !sentJoin && !acked)
+			if (!acked)
 			{
-				std::string welcome;
-				if (FindStringWithPrefix((const uint8_t*)buffer, received, "WELCOME ", welcome))
-				{
-					sentJoin = true;
-					std::vector<uint8_t> joinPacket = BuildJoinPacket(nextOutgoingPacketId++, packetId, nextChSequence++);
-					int sent = send(handle, (const char*)joinPacket.data(), (int)joinPacket.size(), 0);
-					if (DebugNet())
-						fprintf(stderr, "[Net] RemoteConnection: parsed \"%s\", sent %d-byte JOIN reply -> %d\n", welcome.c_str(), (int)joinPacket.size(), sent);
-					acked = true; // the JOIN packet above already acks this server packet
-				}
-			}
-
-			if (!acked && packetId >= 0)
-			{
-				std::vector<uint8_t> ackPacket = BuildAckPacket(nextOutgoingPacketId++, packetId);
+				std::vector<uint8_t> ackPacket = BuildAckPacket(nextOutgoingPacketId++, packet.packetId);
 				int sent = send(handle, (const char*)ackPacket.data(), (int)ackPacket.size(), 0);
 				if (DebugNet())
-					fprintf(stderr, "[Net] RemoteConnection: sent %d-byte ack of server packet %d -> %d\n", (int)ackPacket.size(), packetId, sent);
+					fprintf(stderr, "[Net] RemoteConnection: sent %d-byte ack of server packet %d -> %d\n", (int)ackPacket.size(), packet.packetId, sent);
 			}
 			continue;
 		}
