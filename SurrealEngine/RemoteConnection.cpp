@@ -1,6 +1,9 @@
 
 #include "Precomp.h"
 #include "RemoteConnection.h"
+#include "Engine.h"
+#include "Package/PackageManager.h"
+#include "Utils/File.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -495,6 +498,51 @@ namespace
 		}
 		return result;
 	}
+
+	// Reads a bunch's raw content bytes verbatim - what a file-channel bunch's payload is (a plain
+	// Serialize() of file data, unlike the control channel's FStrings). File content is always a
+	// whole number of bytes on the wire (real UT99 sends it via FArchive::Serialize, a raw byte
+	// copy), so contentBits/8 is exact.
+	std::vector<uint8_t> ReadBunchRawBytes(const uint8_t* data, int size, const ParsedBunch& bunch)
+	{
+		std::vector<uint8_t> result;
+		int byteOff = bunch.contentBitOffset / 8;
+		int subBit = bunch.contentBitOffset % 8;
+		if (byteOff >= size)
+			return result;
+
+		BitReader br(data + byteOff, size - byteOff);
+		if (subBit)
+			br.ReadBits(subBit);
+
+		int numBytes = bunch.contentBits / 8;
+		result.reserve(numBytes);
+		for (int i = 0; i < numBytes; i++)
+			result.push_back((uint8_t)br.ReadBits(8));
+		return result;
+	}
+
+	// Builds our request to download a required package: a bunch that *opens* a new file channel
+	// (bOpen=1, ChType=File), whose content is nothing but the package's 16-byte GUID - exactly
+	// what a real client sends (UFileChannel::ReceivedBunch in the real engine: "Bunch << Guid").
+	// guidHex is the 32-character hex string as the server's "USES GUID=..." message wrote it;
+	// parsing it back into the 4 big-endian 32-bit words it represents and writing each with
+	// WriteInt's LSB-first bit order reproduces the exact same raw bytes a real FGuid's in-memory
+	// layout (four little-endian DWORDs) would serialize to.
+	std::vector<uint8_t> BuildFileChannelRequest(int packetId, int chIndex, int chSequence, const std::string& guidHex)
+	{
+		BitWriter content;
+		for (int i = 0; i < 4; i++)
+		{
+			uint32_t word = (uint32_t)strtoul(guidHex.substr(i * 8, 8).c_str(), nullptr, 16);
+			content.WriteBits(word, 32);
+		}
+
+		BitWriter packet;
+		packet.WriteInt((uint32_t)packetId, MAX_PACKETID);
+		WriteBunch(packet, /*bOpen=*/true, /*bClose=*/false, /*bReliable=*/true, chIndex, CHTYPE_File, chSequence, content);
+		return packet.Finish();
+	}
 }
 
 RemoteConnection::~RemoteConnection()
@@ -565,6 +613,10 @@ bool RemoteConnection::Connect(const std::string& host, int port)
 	if (DebugNet())
 		fprintf(stderr, "[Net] RemoteConnection: sent %d-byte HELLO packet -> %d\n", (int)helloPacket.size(), sent);
 
+	// HELLO consumed the control channel's ChSequence 1; the CHALLENGE handler below hardcodes
+	// NETSPEED+LOGIN as ChSequence 2, so channel 0's next free sequence is 3.
+	nextChSequenceByChannel[0] = 3;
+
 	return true;
 }
 
@@ -577,6 +629,130 @@ void RemoteConnection::Disconnect()
 	}
 	remoteHost.clear();
 	remotePort = 0;
+}
+
+// Every channel has its own ChSequence numbering, starting at 1 when it's opened (confirmed this
+// session against real UT99 source and live captures - the control channel's HELLO bunch is
+// ChSequence 1, and the first bunch on any freshly-opened actor channel in a capture is always 1
+// too, regardless of what other channels are already open). A single flat counter shared across
+// all channels (which is what this connection used before file channels existed, since only the
+// control channel was ever in play) would be wrong here.
+int RemoteConnection::AllocateChSequence(int chIndex)
+{
+	int& next = nextChSequenceByChannel[chIndex];
+	if (next == 0)
+		next = 1;
+	return next++;
+}
+
+// Parses a "USES GUID=<hex> PKG=<name> FLAGS=<n> SIZE=<n> [GEN=<n>] [REALGEN=<n>] FNAME=<file>"
+// message (one per required package, sent after LOGIN succeeds - format cracked earlier this
+// session from a real capture). Anything this engine doesn't already have a same-named local file
+// for is queued for download over a real UE1 file channel. No-op for any other control message.
+void RemoteConnection::HandlePackageListMessage(const std::string& text)
+{
+	if (text.rfind("USES ", 0) != 0)
+		return;
+
+	auto extract = [&](const std::string& key) -> std::string
+	{
+		size_t pos = text.find(key);
+		if (pos == std::string::npos)
+			return {};
+		pos += key.size();
+		size_t end = text.find(' ', pos);
+		return text.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+	};
+
+	std::string guidHex = extract("GUID=");
+	std::string pkgName = extract("PKG=");
+	std::string sizeStr = extract("SIZE=");
+	std::string fileName = extract("FNAME=");
+	if (guidHex.size() != 32 || pkgName.empty() || fileName.empty())
+	{
+		if (DebugNet())
+			fprintf(stderr, "[Net] RemoteConnection: couldn't parse package requirement out of \"%s\" - ignoring\n", text.c_str());
+		return;
+	}
+
+	if (engine && engine->packages && engine->packages->HasPackageFile(pkgName))
+	{
+		if (DebugNet())
+			fprintf(stderr, "[Net] RemoteConnection: package \"%s\" already present locally - not downloading\n", pkgName.c_str());
+		return;
+	}
+
+	RemoteRequiredPackage pkg;
+	pkg.guidHex = guidHex;
+	pkg.packageName = pkgName;
+	pkg.fileName = fileName;
+	pkg.fileSize = (uint32_t)strtoul(sizeStr.c_str(), nullptr, 10);
+
+	if (DebugNet())
+		fprintf(stderr, "[Net] RemoteConnection: package \"%s\" (GUID=%s, %u bytes) missing locally - queued for download\n",
+			pkg.packageName.c_str(), pkg.guidHex.c_str(), pkg.fileSize);
+
+	pendingDownloads.push_back(std::move(pkg));
+	StartNextDownload();
+}
+
+// Downloads one package at a time (real clients appear to pace these too, going by the capture
+// this session's protocol work was built from - a fresh channel per package, not several at
+// once), so this only actually starts a request when nothing else is already in flight.
+void RemoteConnection::StartNextDownload()
+{
+	if (!activeDownloads.empty() || pendingDownloads.empty())
+		return;
+
+	RemoteRequiredPackage pkg = pendingDownloads.front();
+	pendingDownloads.erase(pendingDownloads.begin());
+
+	int chIndex = nextChannelIndex++;
+	int chSequence = AllocateChSequence(chIndex);
+
+	std::vector<uint8_t> requestPacket = BuildFileChannelRequest(nextOutgoingPacketId++, chIndex, chSequence, pkg.guidHex);
+	int sent = send(handle, (const char*)requestPacket.data(), (int)requestPacket.size(), 0);
+	if (DebugNet())
+		fprintf(stderr, "[Net] RemoteConnection: requesting download of \"%s\" (GUID=%s) on channel %d -> %d\n",
+			pkg.packageName.c_str(), pkg.guidHex.c_str(), chIndex, sent);
+
+	RemoteFileDownload download;
+	download.package = std::move(pkg);
+	activeDownloads[chIndex] = std::move(download);
+}
+
+// Called once a file channel's transfer is done (its closing bunch arrived) or has stalled out.
+// A real client validates the transferred size against the size the package list announced and
+// saves the result as <CacheFolder>/<GUID>.uxx (UFileChannel::Destroy in the real engine) - matched
+// here, though nothing downstream (PackageManager) knows how to load a package back out of that
+// cache yet, so this only gets the bytes onto disk in the right place for that to build on later.
+void RemoteConnection::FinishDownload(int chIndex, bool success)
+{
+	auto it = activeDownloads.find(chIndex);
+	if (it == activeDownloads.end())
+		return;
+
+	RemoteFileDownload download = std::move(it->second);
+	activeDownloads.erase(it);
+
+	bool sizeMatches = download.data.size() == download.package.fileSize;
+	if (success && sizeMatches && engine && engine->packages)
+	{
+		std::filesystem::path cacheFolder = engine->packages->GetCacheFolderPath();
+		Directory::create(cacheFolder.string());
+		std::filesystem::path dest = cacheFolder / (download.package.guidHex + ".uxx");
+		File::write_all_bytes(dest.string(), download.data.data(), download.data.size());
+		if (DebugNet())
+			fprintf(stderr, "[Net] RemoteConnection: downloaded \"%s\" (%zu bytes) -> %s\n",
+				download.package.packageName.c_str(), download.data.size(), dest.string().c_str());
+	}
+	else if (DebugNet())
+	{
+		fprintf(stderr, "[Net] RemoteConnection: download of \"%s\" failed or was incomplete (%zu/%u bytes received)\n",
+			download.package.packageName.c_str(), download.data.size(), download.package.fileSize);
+	}
+
+	StartNextDownload();
 }
 
 void RemoteConnection::Tick(float elapsed)
@@ -624,14 +800,29 @@ void RemoteConnection::Tick(float elapsed)
 
 			for (const ParsedBunch& bunch : packet.bunches)
 			{
+				if (bunch.chType == CHTYPE_File)
+				{
+					auto downloadIt = activeDownloads.find(bunch.chIndex);
+					if (downloadIt != activeDownloads.end())
+					{
+						std::vector<uint8_t> chunk = ReadBunchRawBytes((const uint8_t*)buffer, received, bunch);
+						downloadIt->second.data.insert(downloadIt->second.data.end(), chunk.begin(), chunk.end());
+						if (bunch.bClose || downloadIt->second.data.size() >= downloadIt->second.package.fileSize)
+							FinishDownload(bunch.chIndex, true);
+					}
+					continue;
+				}
+
 				if (bunch.chIndex != 0 || bunch.chType != CHTYPE_Control)
-					continue; // only the control channel (index 0) is understood right now
+					continue; // only the control channel (index 0) and file channels are understood right now
 
 				std::vector<std::string> messages = ReadBunchStrings((const uint8_t*)buffer, received, bunch);
 				for (const std::string& text : messages)
 				{
 					if (DebugNet())
 						fprintf(stderr, "[Net] RemoteConnection: control message: \"%s\"\n", text.c_str());
+
+					HandlePackageListMessage(text);
 
 					// Second step of the handshake: once the server's CHALLENGE arrives, reply with
 					// a real NETSPEED+LOGIN message, using a RESPONSE value actually computed from
@@ -670,7 +861,7 @@ void RemoteConnection::Tick(float elapsed)
 					else if (sentLoginReply && !sentJoin && text.rfind("WELCOME ", 0) == 0)
 					{
 						sentJoin = true;
-						std::vector<uint8_t> joinPacket = BuildJoinPacket(nextOutgoingPacketId++, packet.packetId, nextChSequence++);
+						std::vector<uint8_t> joinPacket = BuildJoinPacket(nextOutgoingPacketId++, packet.packetId, AllocateChSequence(0));
 						int sent = send(handle, (const char*)joinPacket.data(), (int)joinPacket.size(), 0);
 						if (DebugNet())
 							fprintf(stderr, "[Net] RemoteConnection: parsed \"%s\", sent %d-byte JOIN reply -> %d\n", text.c_str(), (int)joinPacket.size(), sent);

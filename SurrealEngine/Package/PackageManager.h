@@ -52,6 +52,7 @@ public:
 
 	Package* GetPackage(const NameString& name);
 	Array<NameString> GetPackageNames() const;
+	bool HasPackageFile(const NameString& name) const { return packageFilenames.find(name) != packageFilenames.end(); }
 	Package* GetSaveInfoPackage(const NameString& saveFolderName);
 	void RemoveSaveInfoPackage(const NameString& saveFolderName);
 	std::map<NameString, Package*> GetSaveInfoPackages() const { return saveInfos; };
