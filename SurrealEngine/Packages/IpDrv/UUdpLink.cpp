@@ -5,6 +5,7 @@
 #include "VM/Frame.h"
 #include "Package/PackageManager.h"
 #include "Packages/Core/UClass.h"
+#include "Packages/Core/UFunction.h"
 #include "Engine.h"
 #include <algorithm>
 #include <cstring>
@@ -114,13 +115,14 @@ void UUdpLink::Tick(float elapsed)
 	if (handle == invalid_socket_value)
 		return;
 
-	// Drain every pending datagram this tick, queueing each one (with its sender address) for
-	// ReadText()/ReadBinary() to poll. UdpLink's original Received* events take a leading IpAddr
-	// parameter unlike TcpLink's (connectionless, so the source address matters per-message) -
-	// since that exact signature can't be verified against the loaded class metadata from this
-	// layer and calling a script event with the wrong argument shape risks a VM-level mismatch,
-	// this deliberately sticks to the polling API (which is what server-browser style UnrealScript
-	// typically uses anyway) rather than guessing at the event dispatch.
+	// Bug: this used to unconditionally queue every datagram for ReadText()/ReadBinary() to poll,
+	// on the theory that server-browser-style UnrealScript polls for UDP data rather than using an
+	// event. Confirmed wrong by reading the actual UT99 469d source: UBrowserServerPing (the class
+	// that pings each server discovered by the master browser for its live status) implements
+	// event ReceivedText(IpAddr Addr, string Text) and never polls at all - so a real response
+	// landing in ReceiveQueue with nothing ever calling ReadText() to retrieve it just sat there
+	// forever, which is exactly why the server browser stayed empty even after the UDP send-port
+	// fix: responses were arriving correctly but never reaching the script that builds the list.
 	for (;;)
 	{
 		char buffer[4096];
@@ -141,7 +143,29 @@ void UUdpLink::Tick(float elapsed)
 		datagram.Data.assign(buffer, received);
 		if (DebugNet())
 			fprintf(stderr, "[Net] %s UdpLink received %d bytes from %s: \"%s\"\n", ObjLabel(this).c_str(), received, AddrToString(datagram.From).c_str(), EscapeForLog(datagram.Data).c_str());
-		ReceiveQueue.push_back(std::move(datagram));
+
+		bool dispatched = false;
+		if (ReceiveMode() == RMODE_Event && LinkMode() == MODE_Text)
+		{
+			// Same IpAddr-argument pattern already proven working for InternetLink's Resolved event
+			// (UInternetLink::Tick()) - look up the function's actual declared IpAddr struct type
+			// rather than assuming one, since a mismatched struct layout passed to CallEvent risks a
+			// VM-level mismatch.
+			UFunction* func = FindEventFunction(this, "ReceivedText");
+			if (func && func->Properties.size() >= 1)
+			{
+				UStructProperty prop({}, nullptr, ObjectFlags::NoFlags);
+				prop.Struct = UObject::Cast<UStructProperty>(func->Properties[0])->Struct;
+				IpAddr from_ = datagram.From;
+				if (DebugNet())
+					fprintf(stderr, "[Net] %s UdpLink firing ReceivedText: %d bytes from %s\n", ObjLabel(this).c_str(), (int)datagram.Data.size(), AddrToString(from_).c_str());
+				CallEvent(this, EventName::ReceivedText, { ExpressionValue::Variable(&from_, &prop), ExpressionValue::StringValue(datagram.Data) });
+				dispatched = true;
+			}
+		}
+
+		if (!dispatched)
+			ReceiveQueue.push_back(std::move(datagram));
 	}
 
 	DataPending() = ReceiveQueue.empty() ? 0 : 1;
