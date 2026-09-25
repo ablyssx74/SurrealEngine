@@ -145,8 +145,21 @@ void UUdpLink::Tick(float elapsed)
 			fprintf(stderr, "[Net] %s UdpLink received %d bytes from %s: \"%s\"\n", ObjLabel(this).c_str(), received, AddrToString(datagram.From).c_str(), EscapeForLog(datagram.Data).c_str());
 
 		bool dispatched = false;
-		if (ReceiveMode() == RMODE_Event && LinkMode() == MODE_Text)
+		if (LinkMode() == MODE_Text)
 		{
+			// Bug: this used to also require ReceiveMode() == RMODE_Event before dispatching, on
+			// the assumption that's what real UdpLink does - but confirmed via UT99 469d's actual
+			// IpDrv/InternetLink.uc and IpDrv/UdpLink.uc sources that ReceiveMode defaults to
+			// RMODE_Manual, and nothing anywhere in the real script chain (UBrowserServerPing.uc,
+			// or its spawner UBrowserServerList.uc) ever sets it to RMODE_Event. Yet
+			// UBrowserServerPing's entire GetInfo/GetStatus logic lives inside its ReceivedText
+			// event and it never polls IsDataPending()/ReadText() anywhere - so gating on
+			// ReceiveMode here just silently dropped every response, even though SE_DEBUG_NET
+			// confirmed they were arriving correctly. FindEventFunction() finding an actual
+			// override is already the right gate: any UdpLink-derived class that doesn't implement
+			// ReceivedText itself gets nullptr here and falls through to the polling queue exactly
+			// as before, so this can't regress a genuinely polling-based consumer.
+			//
 			// Same IpAddr-argument pattern already proven working for InternetLink's Resolved event
 			// (UInternetLink::Tick()) - look up the function's actual declared IpAddr struct type
 			// rather than assuming one, since a mismatched struct layout passed to CallEvent risks a
