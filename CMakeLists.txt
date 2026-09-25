@@ -386,6 +386,8 @@ set(SURREALCOMMON_SOURCES
 	SurrealEngine/UnrealURL.h
 	SurrealEngine/RemoteConnection.cpp
 	SurrealEngine/RemoteConnection.h
+	SurrealEngine/ClassNetCache.cpp
+	SurrealEngine/ClassNetCache.h
 	SurrealEngine/Packages/ConSys/UConAudioList.cpp
 	SurrealEngine/Packages/ConSys/UConAudioList.h
 	SurrealEngine/Packages/ConSys/UConCamera.h
