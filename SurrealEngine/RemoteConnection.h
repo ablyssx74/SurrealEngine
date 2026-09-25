@@ -12,12 +12,14 @@ typedef int remote_socket_t;
 
 // WIP scaffolding for real multiplayer client-join support (SurrealEngine currently has no
 // implementation of UT99's actual netcode - see Docs/Status.md). This is NOT a general
-// implementation of that protocol yet: it opens a raw UDP socket toward the server and sends
-// a real captured "HELLO" handshake packet (see RemoteConnection.cpp), so a join attempt is
-// observable (SE_DEBUG_NET logging, capturable in a packet sniffer) and can actually reach a
-// real server's handshake logic instead of just being silently dropped. Building arbitrary
-// outgoing packets (e.g. a login with the local player's real name) still needs a proper
-// bit-packer once the reverse-engineered packet/bunch format is fully nailed down.
+// implementation of that protocol yet: it opens a raw UDP socket toward the server, sends a
+// real captured "HELLO" handshake packet, and (once a response arrives) a real captured
+// "NETSPEED"+"LOGIN" reply (see RemoteConnection.cpp for exactly what and why - both are
+// verbatim bytes from a genuine capture, not yet built from scratch). This has been confirmed
+// to elicit a real CHALLENGE response from a real UT99 server. Building arbitrary outgoing
+// packets (e.g. a login with the local player's real name, or a correctly-computed
+// CHALLENGE/RESPONSE pair instead of a stale replayed one) still needs a proper bit-packer and
+// the CHALLENGE->RESPONSE algorithm, neither of which exist yet.
 class RemoteConnection
 {
 public:
@@ -43,4 +45,5 @@ private:
 	remote_socket_t handle = remote_invalid_socket_value;
 	std::string remoteHost;
 	int remotePort = 0;
+	bool sentLoginReply = false;
 };
