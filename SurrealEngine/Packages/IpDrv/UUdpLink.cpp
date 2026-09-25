@@ -99,6 +99,16 @@ UUdpLink::UUdpLink(NameString name, UClass* base, ObjectFlags flags) : UInternet
 		int nonblocking = 1;
 		ioctl(handle, FIONBIO, &nonblocking);
 #endif
+
+		// Bug: LAN server discovery (UBrowserLocalLink) sends to Addr.Addr = BroadcastAddr, a
+		// UdpLink class default of -1 (255.255.255.255) - but sendto() to a broadcast address is
+		// refused by the OS (EACCES/EPERM) unless SO_BROADCAST is explicitly enabled on the socket
+		// first. That's standard BSD sockets behavior, not engine-specific, and nothing here ever
+		// set it, so every LAN beacon broadcast silently failed to even leave the machine. Safe to
+		// enable unconditionally on every UdpLink socket - it only permits broadcast-address sends,
+		// it doesn't change normal unicast behavior (e.g. the already-working internet server pings).
+		int broadcastEnable = 1;
+		setsockopt(handle, SOL_SOCKET, SO_BROADCAST, (const char*)&broadcastEnable, sizeof(broadcastEnable));
 	}
 }
 
