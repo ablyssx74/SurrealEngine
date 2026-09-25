@@ -4,6 +4,7 @@
 #include "VM/ScriptCall.h"
 #include "VM/Frame.h"
 #include "Package/PackageManager.h"
+#include "Packages/Core/UClass.h"
 #include "Engine.h"
 #include <algorithm>
 #include <cstring>
@@ -33,12 +34,55 @@ namespace
 		return debugNet;
 	}
 
+	// For an IpAddr that genuinely came from the OS (e.g. recvfrom()'s source address) - Port is
+	// real network byte order here, so this needs the ntohs() conversion to display correctly.
 	static std::string AddrToString(const IpAddr& addr)
 	{
 		uint32_t a = ntohl((uint32_t)addr.Addr);
 		char buf[32];
 		snprintf(buf, sizeof(buf), "%u.%u.%u.%u:%u", (a >> 24) & 0xff, (a >> 16) & 0xff, (a >> 8) & 0xff, a & 0xff, ntohs(addr.Port));
 		return buf;
+	}
+
+	// For an IpAddr script constructed itself (e.g. SendText/SendBinary's destination) - confirmed
+	// via SE_DEBUG_NET (see the matching fix in UTcpLink::Open()) that script always hands these
+	// functions a plain, unswapped host-order port number, not a pre-swapped network-byte-order
+	// value - so this must NOT apply ntohs(), unlike AddrToString() above.
+	static std::string ScriptAddrToString(const IpAddr& addr)
+	{
+		uint32_t a = ntohl((uint32_t)addr.Addr);
+		char buf[32];
+		snprintf(buf, sizeof(buf), "%u.%u.%u.%u:%u", (a >> 24) & 0xff, (a >> 16) & 0xff, (a >> 8) & 0xff, a & 0xff, (unsigned)addr.Port);
+		return buf;
+	}
+
+	static std::string EscapeForLog(const std::string& s)
+	{
+		std::string result;
+		result.reserve(s.size());
+		for (unsigned char c : s)
+		{
+			if (c == '\\') result += "\\\\";
+			else if (c == '"') result += "\\\"";
+			else if (c == '\r') result += "\\r";
+			else if (c == '\n') result += "\\n";
+			else if (c < 0x20 || c >= 0x7f)
+			{
+				char buf[8];
+				snprintf(buf, sizeof(buf), "\\x%02x", c);
+				result += buf;
+			}
+			else result += (char)c;
+		}
+		return result;
+	}
+
+	static std::string ObjLabel(UObject* obj)
+	{
+		if (!obj)
+			return "?";
+		std::string className = obj->Class ? obj->Class->Name.ToString() : "?";
+		return className + "'" + obj->Name.ToString() + "'";
 	}
 }
 
@@ -95,6 +139,8 @@ void UUdpLink::Tick(float elapsed)
 		datagram.From.Addr = from.sin_addr.s_addr;
 		datagram.From.Port = from.sin_port;
 		datagram.Data.assign(buffer, received);
+		if (DebugNet())
+			fprintf(stderr, "[Net] %s UdpLink received %d bytes from %s: \"%s\"\n", ObjLabel(this).c_str(), received, AddrToString(datagram.From).c_str(), EscapeForLog(datagram.Data).c_str());
 		ReceiveQueue.push_back(std::move(datagram));
 	}
 
@@ -121,7 +167,7 @@ int UUdpLink::BindPort(int Port, bool bUseNextAvailable)
 		if (result == -1)
 		{
 			if (DebugNet())
-				fprintf(stderr, "[Net] UdpLink.BindPort(%d) failed (errno=%d), %s\n", Port + attempt, errno,
+				fprintf(stderr, "[Net] %s UdpLink.BindPort(%d) failed (errno=%d), %s\n", ObjLabel(this).c_str(), Port + attempt, errno,
 					attempt + 1 < maxAttempts ? "trying next port" : "giving up");
 			continue;
 		}
@@ -139,7 +185,7 @@ int UUdpLink::BindPort(int Port, bool bUseNextAvailable)
 		LocalIP.Port = addr.sin_port;
 
 		if (DebugNet())
-			fprintf(stderr, "[Net] UdpLink.BindPort: bound to port %d\n", ntohs(addr.sin_port));
+			fprintf(stderr, "[Net] %s UdpLink.BindPort: bound to port %d\n", ObjLabel(this).c_str(), ntohs(addr.sin_port));
 
 		return ntohs(addr.sin_port);
 	}
@@ -170,9 +216,16 @@ bool UUdpLink::SendBinary(const IpAddr& Addr, int Count, uint8_t B)
 	memset(&addr, 0, sizeof(sockaddr_in));
 	addr.sin_family = AF_INET;
 	addr.sin_addr.s_addr = Addr.Addr;
-	addr.sin_port = Addr.Port;
+	// Bug: same missing byte-order conversion as UTcpLink::Open() - Addr.Port is script's plain
+	// host-order port number, not pre-swapped network byte order, so every packet here was
+	// silently sent to a byte-swapped destination port instead of the real one. This is exactly
+	// why UBrowserServerPing's per-server status queries were going nowhere: they ping each
+	// discovered server's real game port (e.g. 7778) via this function.
+	addr.sin_port = htons((uint16_t)Addr.Port);
 
 	int result = sendto(handle, (const char*)&B, Count, 0, (const sockaddr*)&addr, sizeof(sockaddr_in));
+	if (DebugNet())
+		fprintf(stderr, "[Net] %s UdpLink.SendBinary(%d bytes) to %s -> %d\n", ObjLabel(this).c_str(), Count, ScriptAddrToString(Addr).c_str(), result);
 	return result != -1;
 }
 
@@ -198,12 +251,15 @@ bool UUdpLink::SendText(const IpAddr& Addr, const std::string& Str)
 	memset(&addr, 0, sizeof(sockaddr_in));
 	addr.sin_family = AF_INET;
 	addr.sin_addr.s_addr = Addr.Addr;
-	addr.sin_port = Addr.Port;
+	// Bug: same missing byte-order conversion as SendBinary()/UTcpLink::Open() above.
+	addr.sin_port = htons((uint16_t)Addr.Port);
 
 	std::string msg = Str;
 	if (LinkMode() == MODE_Line)
 		msg += "\r\n";
 
 	int result = sendto(handle, msg.c_str(), (int)msg.size(), 0, (const sockaddr*)&addr, sizeof(sockaddr_in));
+	if (DebugNet())
+		fprintf(stderr, "[Net] %s UdpLink.SendText(%d bytes) to %s -> %d: \"%s\"\n", ObjLabel(this).c_str(), (int)msg.size(), ScriptAddrToString(Addr).c_str(), result, EscapeForLog(msg).c_str());
 	return result != -1;
 }
