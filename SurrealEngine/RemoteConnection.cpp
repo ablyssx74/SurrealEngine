@@ -58,6 +58,27 @@ namespace
 				WriteBit((value >> i) & 1);
 		}
 
+		// UE1's universal bounded-integer primitive (FBitWriter::SerializeInt/WriteInt in the real
+		// engine, confirmed against real 1997-1999 UT99 source this session). Encodes a value in
+		// [0,valueMax) as a truncated binary code: one bit per doubling of a mask, stopping as soon
+		// as the accumulated value-so-far plus the next mask can no longer reach valueMax - meaning
+		// it's self-terminating (the reader tracks the same running total and stops the same way)
+		// and, for values near the top of a non-power-of-two range, uses fewer bits than a fixed
+		// ceil(log2(valueMax)) width would. Only *looks* fixed-width for a power-of-two valueMax
+		// (every case this session validated empirically before this source turned up, e.g.
+		// MAX_PACKETID=16384) - it genuinely isn't for others (e.g. MAX_CHANNELS=1023).
+		void WriteInt(uint32_t value, uint32_t valueMax)
+		{
+			uint32_t newValue = 0;
+			for (uint32_t mask = 1; newValue + mask < valueMax && mask != 0; mask <<= 1)
+			{
+				bool bit = (value & mask) != 0;
+				WriteBit(bit ? 1 : 0);
+				if (bit)
+					newValue += mask;
+			}
+		}
+
 		// Epic's classic "compact index" variable-length integer, as used throughout Unreal's
 		// serialization: byte 0 holds 6 magnitude bits then a continue bit then a sign bit (all
 		// LSB-first); each following byte holds 7 more magnitude bits then a continue bit. We only
@@ -138,6 +159,19 @@ namespace
 			return value;
 		}
 
+		// The reader side of WriteInt above - see its comment for the algorithm. Tracks the exact
+		// same running total the writer did, so it independently knows when to stop.
+		uint32_t ReadInt(uint32_t valueMax)
+		{
+			uint32_t value = 0;
+			for (uint32_t mask = 1; value + mask < valueMax && mask != 0; mask <<= 1)
+			{
+				if (ReadBit())
+					value |= mask;
+			}
+			return value;
+		}
+
 		uint32_t ReadCompactIndex()
 		{
 			uint32_t b0 = ReadBits(8);
@@ -184,28 +218,37 @@ namespace
 		CHTYPE_File = 3,
 	};
 
-	// Field widths for UE1's universal "ReadInt(Max)/WriteInt(Max)" bounded-integer primitive.
-	// Confirmed this session against a real 1997-1999 UT99 engine source excerpt: it serializes a
-	// value in [0,Max) using a fixed number of bits equal to the position of the highest bit Max-1
-	// needs (i.e. it writes one bit per doubling of a mask starting at 1 until the mask reaches or
-	// exceeds Max) - NOT a value-dependent variable-length scheme like the compact index above.
-	// Each width below was independently confirmed empirically against real captured traffic
-	// before the source was available, then matched exactly once the source explained why:
-	//   MAX_PACKETID   = 16384  -> 14 bits (PacketId, AckPacketId)
-	//   MAX_CHANNELS   =  1024  -> 10 bits (ChIndex)
-	//   MAX_CHSEQUENCE =  1024  -> 10 bits (ChSequence)
-	//   CHTYPE_MAX     =     8  ->  3 bits (ChType) - inferred from real traffic; only values 0-3
-	//   are used in practice, but a 2-bit field would misalign nearly every bunch, and testing
-	//   against 265+ real captured packets spanning the full handshake through a live actor-
-	//   replication burst only decodes cleanly (no overflow/truncation anywhere) with 3 bits.
-	//   MaxPacket*8    =  4096  -> 12 bits (BunchDataBits, a bit count not a byte count) - MaxPacket
-	//   itself (512 bytes) matches the largest packets ever observed in any real capture (~505-510
-	//   bytes of payload, consistent with a 512-byte cap minus header/trailer overhead).
-	constexpr int PACKETID_BITS = 14;
-	constexpr int CHINDEX_BITS = 10;
-	constexpr int CHSEQUENCE_BITS = 10;
-	constexpr int CHTYPE_BITS = 3;
-	constexpr int BUNCH_LENGTH_BITS = 12;
+	// The "Max" bounds for UE1's WriteInt/ReadInt bounded-integer primitive (see BitWriter::WriteInt
+	// above), confirmed this session against real 1997-1999 UT99 engine source (UnNet.h/UnConn.h
+	// for the constants, UnBits.cpp for the algorithm - it's a self-terminating truncated binary
+	// code, not a fixed bit width, though it happens to produce a fixed width whenever Max is an
+	// exact power of two, which is how every one of these was first found empirically before the
+	// source was available):
+	//   MAX_PACKETID   = 16384  (PacketId, AckPacketId)
+	//   MAX_CHANNELS   =  1023  (ChIndex) - NOT a power of two, so this one genuinely does vary in
+	//   width for values near the top of the range, unlike the others below.
+	//   MAX_CHSEQUENCE =  1024  (ChSequence)
+	//   CHTYPE_MAX     =     8  (ChType)
+	//   MaxPacket*8    =  4096  (BunchDataBits, a bit count not a byte count) - MaxPacket itself
+	//   (512 bytes) matches the largest packets ever observed in any real capture (~505-510 bytes
+	//   of payload, consistent with a 512-byte cap minus header/trailer overhead).
+	constexpr uint32_t MAX_PACKETID = 16384;
+	constexpr uint32_t MAX_CHANNELS = 1023;
+	constexpr uint32_t MAX_CHSEQUENCE = 1024;
+	constexpr uint32_t CHTYPE_MAX = 8;
+	constexpr uint32_t MAX_BUNCH_DATA_BITS = 512 * 8;
+
+	// The most bits WriteInt(valueMax) could ever produce (i.e. what a fixed-width encoding would
+	// use). Used only as a guard when parsing - real data always has at least this many bits left
+	// for a genuine field of this kind, so seeing fewer means what's left is the packet's trailer
+	// bit and padding, not a real field, and parsing should stop rather than try to interpret it.
+	int MaxBitsForRange(uint32_t valueMax)
+	{
+		int bits = 0;
+		for (uint32_t mask = 1; mask < valueMax && mask != 0; mask <<= 1)
+			bits++;
+		return bits;
+	}
 
 	// UT99's connection-level challenge/response transform (UGameEngine::ChallengeResponse in the
 	// real engine). Cracked this session by finding a real (CHALLENGE, RESPONSE) pair in a genuine
@@ -236,12 +279,12 @@ namespace
 			packet.WriteBit(bClose ? 1 : 0);
 		}
 		packet.WriteBit(bReliable ? 1 : 0);
-		packet.WriteBits((uint32_t)chIndex, CHINDEX_BITS);
+		packet.WriteInt((uint32_t)chIndex, MAX_CHANNELS);
 		if (bReliable)
-			packet.WriteBits((uint32_t)chSequence, CHSEQUENCE_BITS);
+			packet.WriteInt((uint32_t)chSequence, MAX_CHSEQUENCE);
 		if (bReliable || bOpen)
-			packet.WriteBits((uint32_t)chType, CHTYPE_BITS);
-		packet.WriteBits((uint32_t)content.GetBitCount(), BUNCH_LENGTH_BITS);
+			packet.WriteInt((uint32_t)chType, CHTYPE_MAX);
+		packet.WriteInt((uint32_t)content.GetBitCount(), MAX_BUNCH_DATA_BITS);
 		packet.AppendBits(content);
 	}
 
@@ -251,7 +294,7 @@ namespace
 	void WriteAckEntry(BitWriter& packet, int ackPacketId)
 	{
 		packet.WriteBit(1);
-		packet.WriteBits((uint32_t)ackPacketId, PACKETID_BITS);
+		packet.WriteInt((uint32_t)ackPacketId, MAX_PACKETID);
 	}
 
 	// A reliable, already-open (bOpen=bClose=0) control-channel (ChIndex=0, ChType=Control) bunch
@@ -267,7 +310,7 @@ namespace
 	std::vector<uint8_t> BuildAckPacket(int packetId, int ackPacketId)
 	{
 		BitWriter packet;
-		packet.WriteBits((uint32_t)packetId, PACKETID_BITS);
+		packet.WriteInt((uint32_t)packetId, MAX_PACKETID);
 		WriteAckEntry(packet, ackPacketId);
 		return packet.Finish();
 	}
@@ -283,7 +326,7 @@ namespace
 		content.WriteString("HELLO REV=101 MINVER=432 VER=469");
 
 		BitWriter packet;
-		packet.WriteBits(0, PACKETID_BITS);
+		packet.WriteInt(0, MAX_PACKETID);
 		WriteBunch(packet, /*bOpen=*/true, /*bClose=*/false, /*bReliable=*/true, /*chIndex=*/0, CHTYPE_Control, /*chSequence=*/1, content);
 		return packet.Finish();
 	}
@@ -299,7 +342,7 @@ namespace
 			" URL=Index.unr?LAN?Name=TR30?Class=SkeletalChars.WarBoss?team=1?skin=?Face=?Voice=?OverrideClass=?Checksum=NoChecksum");
 
 		BitWriter packet;
-		packet.WriteBits((uint32_t)packetId, PACKETID_BITS);
+		packet.WriteInt((uint32_t)packetId, MAX_PACKETID);
 		WriteAckEntry(packet, ackPacketId);
 		WriteControlBunch(packet, chSequence, content);
 		return packet.Finish();
@@ -313,7 +356,7 @@ namespace
 		content.WriteString("JOIN");
 
 		BitWriter packet;
-		packet.WriteBits((uint32_t)packetId, PACKETID_BITS);
+		packet.WriteInt((uint32_t)packetId, MAX_PACKETID);
 		WriteAckEntry(packet, ackPacketId);
 		WriteControlBunch(packet, chSequence, content);
 		return packet.Finish();
@@ -355,9 +398,9 @@ namespace
 	{
 		ParsedPacket result;
 		BitReader br(data, size);
-		if (br.RemainingBits() < PACKETID_BITS)
+		if (br.RemainingBits() < MaxBitsForRange(MAX_PACKETID))
 			return result;
-		result.packetId = (int)br.ReadBits(PACKETID_BITS);
+		result.packetId = (int)br.ReadInt(MAX_PACKETID);
 		result.valid = true;
 
 		while (br.RemainingBits() >= 1)
@@ -365,9 +408,9 @@ namespace
 			int isAck = br.ReadBit();
 			if (isAck)
 			{
-				if (br.RemainingBits() < PACKETID_BITS)
+				if (br.RemainingBits() < MaxBitsForRange(MAX_PACKETID))
 					break; // the packet's trailer bit, not a real ack entry
-				result.acks.push_back((int)br.ReadBits(PACKETID_BITS));
+				result.acks.push_back((int)br.ReadInt(MAX_PACKETID));
 			}
 			else
 			{
@@ -385,26 +428,26 @@ namespace
 				if (br.RemainingBits() < 1)
 					break;
 				bool bReliable = br.ReadBit() != 0;
-				if (br.RemainingBits() < CHINDEX_BITS)
+				if (br.RemainingBits() < MaxBitsForRange(MAX_CHANNELS))
 					break;
-				int chIndex = (int)br.ReadBits(CHINDEX_BITS);
+				int chIndex = (int)br.ReadInt(MAX_CHANNELS);
 				int chSequence = 0;
 				if (bReliable)
 				{
-					if (br.RemainingBits() < CHSEQUENCE_BITS)
+					if (br.RemainingBits() < MaxBitsForRange(MAX_CHSEQUENCE))
 						break;
-					chSequence = (int)br.ReadBits(CHSEQUENCE_BITS);
+					chSequence = (int)br.ReadInt(MAX_CHSEQUENCE);
 				}
 				int chType = CHTYPE_None;
 				if (bReliable || bOpen)
 				{
-					if (br.RemainingBits() < CHTYPE_BITS)
+					if (br.RemainingBits() < MaxBitsForRange(CHTYPE_MAX))
 						break;
-					chType = (int)br.ReadBits(CHTYPE_BITS);
+					chType = (int)br.ReadInt(CHTYPE_MAX);
 				}
-				if (br.RemainingBits() < BUNCH_LENGTH_BITS)
+				if (br.RemainingBits() < MaxBitsForRange(MAX_BUNCH_DATA_BITS))
 					break;
-				int contentBits = (int)br.ReadBits(BUNCH_LENGTH_BITS);
+				int contentBits = (int)br.ReadInt(MAX_BUNCH_DATA_BITS);
 				if (contentBits < 0 || contentBits > br.RemainingBits())
 					break;
 
