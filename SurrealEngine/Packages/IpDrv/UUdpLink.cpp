@@ -227,6 +227,45 @@ int UUdpLink::BindPort(int Port, bool bUseNextAvailable)
 		return ntohs(addr.sin_port);
 	}
 
+	// Bug: same fixed-range exhaustion as UTcpLink::BindPort() (see its matching fix/comment) -
+	// once maxAttempts consecutive ports are all taken, this gave up permanently instead of
+	// falling back to any free port. Confirmed via SE_DEBUG_NET: UBrowserServerList spawns one
+	// UBrowserServerPing (a UdpLink) per server being queried, all requesting the same small
+	// starting port range, and none of them are freed quickly enough (Destroy() presumably defers
+	// actual socket cleanup to a later GC pass) to keep up with hundreds of servers - so only the
+	// first ~20 concurrent pings could ever bind at all, and every later one (and every later
+	// browser-tab refresh, which starts a fresh wave of pings against the same still-exhausted
+	// range) permanently failed to bind, never even sending its query. Which local port gets used
+	// doesn't matter functionally here - the server always replies to whatever source port the
+	// query was actually sent from - so fall back to any free port instead of giving up.
+	if (Port != 0)
+	{
+		sockaddr_in addr;
+		memset(&addr, 0, sizeof(sockaddr_in));
+		addr.sin_family = AF_INET;
+		addr.sin_addr.s_addr = INADDR_ANY;
+		addr.sin_port = 0;
+
+		if (bind(handle, (const sockaddr*)&addr, sizeof(sockaddr_in)) == 0)
+		{
+#ifdef WIN32
+			int size = sizeof(sockaddr_in);
+#else
+			socklen_t size = sizeof(sockaddr_in);
+#endif
+			if (getsockname(handle, (sockaddr*)&addr, &size) == 0)
+			{
+				LocalIP.Addr = addr.sin_addr.s_addr;
+				LocalIP.Port = addr.sin_port;
+
+				if (DebugNet())
+					fprintf(stderr, "[Net] %s UdpLink.BindPort: requested port %d unavailable, fell back to port %d\n", ObjLabel(this).c_str(), Port, ntohs(addr.sin_port));
+
+				return ntohs(addr.sin_port);
+			}
+		}
+	}
+
 	return 0;
 }
 
