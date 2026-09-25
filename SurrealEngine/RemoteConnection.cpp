@@ -175,6 +175,16 @@ namespace
 		int bitPos = 0;
 	};
 
+	// Every packet, whatever it contains, starts with a 14-bit PacketId - used to ack whatever
+	// the server just sent us, independent of whether we understand its contents.
+	int ReadPacketId(const uint8_t* data, int size)
+	{
+		if (size < 2)
+			return -1;
+		BitReader br(data, size);
+		return (int)br.ReadBits(14);
+	}
+
 	// UT99's connection-level challenge/response transform (UGameEngine::ChallengeResponse in
 	// the real engine). Cracked this session by finding a real (CHALLENGE, RESPONSE) pair in a
 	// genuine capture and testing hypotheses against it; the exact formula was then independently
@@ -220,6 +230,17 @@ namespace
 		packet.WriteBit(hasAck ? 1 : 0);
 		if (hasAck)
 			packet.WriteBits((uint32_t)ackPacketId, 14);
+	}
+
+	// An ack carrying no bunch data at all - what a real client sends when it has nothing new to
+	// say but needs the server to know it's still there and which packets have arrived. Matches
+	// the shape of real ack-only packets seen in the original capture (PacketId+HasAck+
+	// AckPacketId, then just the trailer bit and padding).
+	std::vector<uint8_t> BuildAckPacket(int packetId, int ackPacketId)
+	{
+		BitWriter packet;
+		WritePacketHeader(packet, packetId, true, ackPacketId);
+		return packet.Finish();
 	}
 
 	// Builds our reply to the server's CHALLENGE: a NETSPEED message and a LOGIN message (with a
@@ -338,28 +359,13 @@ bool RemoteConnection::Connect(const std::string& host, int port)
 	if (DebugNet())
 		fprintf(stderr, "[Net] RemoteConnection: socket ready, target %s:%d\n", host.c_str(), port);
 
-	// First real handshake attempt. This is NOT a general encoder yet - UE1's packet/bunch bit
-	// format was reverse-engineered from a genuine Wireshark capture of a real UT99-for-Linux
-	// client joining a real UT99-for-Linux server (see the session notes), and most of it now
-	// checks out, but a few bits of the bunch header are still uncertain (see below). Rather than
-	// risk sending something subtly wrong that a real server just silently drops (as it already
-	// did with the old 4-byte placeholder probe), this sends the literal bytes of a real client's
-	// first-ever packet from that capture: PacketId=0, no ack yet, one reliable control-channel
-	// bunch containing "HELLO REV=101 MINVER=432 VER=469\0" - the exact string a real 469-build
-	// client sends to open a connection. Those captured bytes are known-correct (a real server
-	// accepted them and replied with a real CHALLENGE), and they happen to be bit-identical to
-	// what our own PacketId/HasAck encoding would produce for a first packet anyway (both are 0),
-	// so replaying them verbatim is a valid way to test whether *our* transport (socket open,
-	// connect(), send()) can elicit a real response - independent of whether our own from-scratch
-	// bit-packer (needed later for messages we can't just replay, like a login with a real player
-	// name) is exactly right yet.
-	//
-	// Remaining uncertainty in the reverse-engineered bunch header (doesn't affect this replay,
-	// but matters once we build packets from scratch): after a 3-bit flags field (bOpen/bClose/
-	// bReliable, believed 0/0/1 here), a 10-bit ChIndex (0), and a 10-bit ChSequence (1 for the
-	// first reliable bunch), there are two more fields - a channel-type and a content-length -
-	// that decode as Unreal's classic "compact index" variable-length integers, but their exact
-	// bit boundary is uncertain by about 1 bit.
+	// Still a captured/replayed packet, not built with our own bit-packer (see WriteControlBunch
+	// et al. above) - unlike every later message, this one opens a brand new channel (bOpen=1),
+	// and that case needs one more header bit whose exact meaning isn't nailed down yet (every
+	// other message reverse-engineered this session continues an already-open channel, so
+	// doesn't need it). These are the literal bytes of a real client's first-ever packet from a
+	// genuine capture: PacketId=0, no ack yet, one reliable control-channel bunch containing
+	// "HELLO REV=101 MINVER=432 VER=469\0" - confirmed working against a live UT99 server.
 	static const uint8_t helloPacket[41] = {
 		0x00, 0x80, 0x05, 0x20, 0x80, 0x40, 0x44, 0x08, 0x52, 0x11, 0x13, 0xd3, 0x13, 0x88, 0x54,
 		0x91, 0x55, 0x4f, 0x0c, 0x4c, 0x0c, 0x48, 0x53, 0x92, 0x93, 0x55, 0x91, 0x54, 0x0f, 0xcd,
@@ -408,6 +414,17 @@ void RemoteConnection::Tick(float elapsed)
 					received, remoteHost.c_str(), remotePort, hex.c_str(), received > shown ? "..." : "");
 			}
 
+			// Every packet needs to be acked eventually, whether or not we understand its
+			// contents - without that, a real server has no way to know we're still receiving,
+			// and (as seen in testing) falls back to periodically resending an empty packet
+			// while it waits.
+			int packetId = ReadPacketId((const uint8_t*)buffer, received);
+			if (packetId >= 0 && packetId > highestServerPacketId)
+			{
+				highestServerPacketId = packetId;
+				needsAck = true;
+			}
+
 			// Second step of the handshake: once the server's CHALLENGE arrives, reply with a real
 			// NETSPEED+LOGIN message built by our own bit-packer, using a RESPONSE value we
 			// actually compute from the server's challenge (see ChallengeResponse above) instead
@@ -430,6 +447,7 @@ void RemoteConnection::Tick(float elapsed)
 					int sent = send(handle, (const char*)loginPacket.data(), (int)loginPacket.size(), 0);
 					if (DebugNet())
 						fprintf(stderr, "[Net] RemoteConnection: sent %d-byte NETSPEED+LOGIN reply (built with a real computed RESPONSE) -> %d\n", (int)loginPacket.size(), sent);
+					needsAck = false; // the login packet above already acks serverPacketId
 				}
 				else if (DebugNet())
 				{
@@ -456,5 +474,17 @@ void RemoteConnection::Tick(float elapsed)
 #endif
 		}
 		break;
+	}
+
+	// Nothing left to receive right now - if any of what we just read hasn't been acked yet
+	// (and wasn't already implicitly acked by a reply above), send a plain ack so the server
+	// knows we're still here and doesn't need to keep idling/retransmitting for us.
+	if (needsAck)
+	{
+		needsAck = false;
+		std::vector<uint8_t> ackPacket = BuildAckPacket(nextOutgoingPacketId++, highestServerPacketId);
+		int sent = send(handle, (const char*)ackPacket.data(), (int)ackPacket.size(), 0);
+		if (DebugNet())
+			fprintf(stderr, "[Net] RemoteConnection: sent %d-byte ack of server packet %d -> %d\n", (int)ackPacket.size(), highestServerPacketId, sent);
 	}
 }
