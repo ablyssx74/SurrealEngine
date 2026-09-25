@@ -680,9 +680,15 @@ void Engine::LoadMap(const UnrealURL& url, const std::map<std::string, std::stri
 
 	LevelInfo->ComputerName() = "MyComputer";
 	LevelInfo->HubStackLevel() = 0; // To do: handle level hubs
-	LevelInfo->EngineVersion() = LaunchInfo.gameVersionString + " SE";
+	// Bug: this used to append " SE" (presumably to self-identify as SurrealEngine), but
+	// EngineVersion/MinNetVersion aren't free-form display text - real script code treats them as a
+	// bare version number. E.g. UTBrowserUpdateServerLink.uc builds its MOTD/update-check URL as
+	// "/UpdateServer/utmotd" $ EngineVersion $ ".html", so the extra text produced a URL with an
+	// embedded space ("utmotd436 SE.html") that got rejected as a malformed HTTP request - and a
+	// real server's MinNetVersion compatibility check almost certainly expects a plain number too.
+	LevelInfo->EngineVersion() = LaunchInfo.gameVersionString;
 	if (LaunchInfo.ue1Version > 219)
-		LevelInfo->MinNetVersion() = LaunchInfo.gameVersionString + " SE";
+		LevelInfo->MinNetVersion() = LaunchInfo.gameVersionString;
 	LevelInfo->bHighDetailMode() = true;
 	LevelInfo->NetMode() = 0; // NM_StandAlone
 	LevelInfo->DefaultTexture() = engine->DefaultTexture;
@@ -799,9 +805,9 @@ void Engine::LoadFromSaveFile(const UnrealURL& url)
 	// re-established on every load regardless of what the package/save file contains.
 	LevelInfo->ComputerName() = "MyComputer";
 	LevelInfo->HubStackLevel() = 0; // To do: handle level hubs
-	LevelInfo->EngineVersion() = LaunchInfo.gameVersionString + " SE";
+	LevelInfo->EngineVersion() = LaunchInfo.gameVersionString;
 	if (LaunchInfo.ue1Version > 219)
-		LevelInfo->MinNetVersion() = LaunchInfo.gameVersionString + " SE";
+		LevelInfo->MinNetVersion() = LaunchInfo.gameVersionString;
 	LevelInfo->bHighDetailMode() = true;
 	LevelInfo->NetMode() = 0; // NM_StandAlone
 	LevelInfo->DefaultTexture() = engine->DefaultTexture;
