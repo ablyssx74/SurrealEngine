@@ -121,6 +121,7 @@ namespace
 		BitReader(const uint8_t* data, int sizeBytes) : data(data), sizeBits(sizeBytes * 8) {}
 
 		int RemainingBits() const { return sizeBits - bitPos; }
+		int GetBitPos() const { return bitPos; }
 
 		int ReadBit()
 		{
@@ -294,6 +295,61 @@ namespace
 		outChallenge = (int32_t)strtol(text.c_str() + pos, nullptr, 10);
 		return true;
 	}
+
+	// Reads every string out of a packet's single control-channel bunch, e.g. to spot a known
+	// message like "WELCOME ..." without needing to understand everything else that might be in
+	// there. A bunch's content is just concatenated WriteString()-style strings with no extra
+	// framing between them (confirmed this session - real captured messages like NETSPEED+LOGIN
+	// or a run of package USES lines sit back to back with zero bits of gap), so this just keeps
+	// reading strings until the bunch's declared content length is used up. Returns whatever it
+	// managed to parse (possibly empty) for anything that doesn't look like a single control-
+	// channel bunch, or if something looks malformed partway through.
+	std::vector<std::string> ParseControlBunchStrings(const uint8_t* data, int size)
+	{
+		std::vector<std::string> result;
+		BitReader br(data, size);
+		br.ReadBits(14); // PacketId
+		if (br.ReadBit() != 0) // HasAck
+			br.ReadBits(14);
+		if (br.RemainingBits() < 23)
+			return result;
+
+		br.ReadBit(); br.ReadBit(); br.ReadBit(); // bOpen/bClose/bReliable - not needed
+		uint32_t chIndex = br.ReadBits(10);
+		br.ReadBits(10); // ChSequence - not needed
+		if (chIndex != 0) // not the control channel - actor channels aren't understood yet
+			return result;
+
+		uint32_t combined = br.ReadBits(8);
+		uint32_t remainder = (combined >> 6) & 0x3;
+		uint32_t quotient = br.ReadBits(7);
+		uint32_t contentBytes = quotient * 4 + remainder;
+		if (contentBytes == 0 || (uint32_t)br.RemainingBits() < contentBytes * 8)
+			return result;
+
+		int contentEnd = br.GetBitPos() + (int)contentBytes * 8;
+		while (br.GetBitPos() < contentEnd)
+		{
+			std::string s = br.ReadString();
+			if (br.GetBitPos() > contentEnd) // overran - the rest wasn't really a string, stop
+				break;
+			result.push_back(std::move(s));
+		}
+		return result;
+	}
+
+	// Builds our reply once the server's WELCOME arrives: a "JOIN" message in a reliable
+	// control-channel bunch, exactly mirroring what a real client sends to enter the game.
+	std::vector<uint8_t> BuildJoinPacket(int packetId, int ackPacketId, int chSequence)
+	{
+		BitWriter content;
+		content.WriteString("JOIN");
+
+		BitWriter packet;
+		WritePacketHeader(packet, packetId, true, ackPacketId);
+		WriteControlBunch(packet, chSequence, content);
+		return packet.Finish();
+	}
 }
 
 RemoteConnection::~RemoteConnection()
@@ -451,6 +507,30 @@ void RemoteConnection::Tick(float elapsed)
 				else if (DebugNet())
 				{
 					fprintf(stderr, "[Net] RemoteConnection: received data didn't parse as a CHALLENGE packet - not replying yet\n");
+				}
+			}
+
+			// Third step: once the server's WELCOME arrives (after LOGIN, it sends the required-
+			// package list, then WELCOME), tell it we're entering the game. A real client's JOIN
+			// is what makes the server start spawning actors and replicating real gameplay state -
+			// understanding and applying that (a PackageMap/class-index scheme, an actor channel
+			// that can decode property writes) is a much bigger and separately-scoped piece of
+			// work that doesn't exist yet, so for now this just gets the message sent and logs
+			// whatever comes back afterward via the normal receive logging above.
+			if (sentLoginReply && !sentJoin && !acked)
+			{
+				for (const std::string& s : ParseControlBunchStrings((const uint8_t*)buffer, received))
+				{
+					if (s.rfind("WELCOME ", 0) == 0)
+					{
+						sentJoin = true;
+						std::vector<uint8_t> joinPacket = BuildJoinPacket(nextOutgoingPacketId++, packetId, nextChSequence++);
+						int sent = send(handle, (const char*)joinPacket.data(), (int)joinPacket.size(), 0);
+						if (DebugNet())
+							fprintf(stderr, "[Net] RemoteConnection: parsed \"%s\", sent %d-byte JOIN reply -> %d\n", s.c_str(), (int)joinPacket.size(), sent);
+						acked = true; // the JOIN packet above already acks this server packet
+						break;
+					}
 				}
 			}
 

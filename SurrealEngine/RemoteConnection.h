@@ -47,5 +47,7 @@ private:
 	std::string remoteHost;
 	int remotePort = 0;
 	bool sentLoginReply = false;
+	bool sentJoin = false;
 	int nextOutgoingPacketId = 2; // 0 was HELLO, 1 was NETSPEED+LOGIN
+	int nextChSequence = 3; // 1 was HELLO's bunch, 2 was NETSPEED+LOGIN's
 };
