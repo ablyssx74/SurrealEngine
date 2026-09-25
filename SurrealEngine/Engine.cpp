@@ -196,6 +196,7 @@ void Engine::Run()
 		LevelInfo->Millisecond() = 0; // No timedesc equivalent for LevelInfo->Millisecond()
 
 		UpdateInput(realTimeElapsed);
+		remoteConnection.Tick(realTimeElapsed);
 
 		SetPause(!LevelInfo->Pauser().empty());
 
@@ -304,6 +305,18 @@ void Engine::Run()
 			LogMessage("Client travel to " + url.ToString());
 			LoadMap(url, CreateTravelInfo(ClientTravelInfo.TransferItems));
 			LoginPlayer();
+		}
+		else if (!ClientTravelInfo.URL.Host.empty())
+		{
+			// WIP: joining a real remote server. LoadMap() only ever loads from local packages
+			// and never runs here (a real join URL has no local map name - see UnrealURL.cpp),
+			// so without this branch a join attempt used to just silently do nothing. This
+			// doesn't implement UT99's actual netcode (see RemoteConnection.h) - it opens a raw
+			// UDP socket and sends a placeholder probe so the attempt is at least observable via
+			// SE_DEBUG_NET and a packet capture, as a first step toward the real thing.
+			LogMessage("Attempting to connect to " + ClientTravelInfo.URL.Host + ":" + std::to_string(ClientTravelInfo.URL.Port) + " (multiplayer join is not implemented yet)");
+			remoteConnection.Connect(ClientTravelInfo.URL.Host, ClientTravelInfo.URL.Port);
+			ClientTravelInfo.URL = UnrealURL();
 		}
 	}
 

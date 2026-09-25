@@ -8,6 +8,7 @@
 #include "GameWindow.h"
 #include "Packages/Engine/Actors/UActor.h"
 #include "UnrealURL.h"
+#include "RemoteConnection.h"
 #include "GameFolder.h"
 #include <set>
 #include <list>
@@ -167,6 +168,9 @@ public:
 		ETravelType TravelType = ETravelType::TRAVEL_Absolute;
 		bool TransferItems = false;
 	} ClientTravelInfo;
+
+	// WIP: see RemoteConnection.h - not a working implementation of UT99's netcode yet.
+	RemoteConnection remoteConnection;
 
 	struct
 	{
