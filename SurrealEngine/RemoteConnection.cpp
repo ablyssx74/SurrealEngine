@@ -296,46 +296,69 @@ namespace
 		return true;
 	}
 
-	// Reads every string out of a packet's single control-channel bunch, e.g. to spot a known
-	// message like "WELCOME ..." without needing to understand everything else that might be in
-	// there. A bunch's content is just concatenated WriteString()-style strings with no extra
-	// framing between them (confirmed this session - real captured messages like NETSPEED+LOGIN
-	// or a run of package USES lines sit back to back with zero bits of gap), so this just keeps
-	// reading strings until the bunch's declared content length is used up. Returns whatever it
-	// managed to parse (possibly empty) for anything that doesn't look like a single control-
-	// channel bunch, or if something looks malformed partway through.
-	std::vector<std::string> ParseControlBunchStrings(const uint8_t* data, int size)
+	// Scans every possible bit offset in a packet for a compact-index-length-prefixed printable
+	// ASCII string starting with the given prefix. This doesn't rely on understanding the
+	// packet/bunch header at all - it's the same brute-force technique originally used to
+	// reverse-engineer this protocol from captures - so unlike a structured parse (tried first;
+	// see the session notes), it works even for bunch types whose exact header encoding isn't
+	// understood: real testing found the package-list/WELCOME traffic uses a still-unexplained
+	// "irregular flags" bunch variant (also seen for the multi-string package-list bunches
+	// themselves) that the normal 3-flags+ChIndex+ChSequence+ChType+length model doesn't decode
+	// correctly, silently breaking a structured search for WELCOME. Confirmed against the real
+	// captured packet that contains WELCOME in the original session's capture.
+	bool FindStringWithPrefix(const uint8_t* data, int size, const std::string& prefix, std::string& outText)
 	{
-		std::vector<std::string> result;
-		BitReader br(data, size);
-		br.ReadBits(14); // PacketId
-		if (br.ReadBit() != 0) // HasAck
-			br.ReadBits(14);
-		if (br.RemainingBits() < 23)
-			return result;
-
-		br.ReadBit(); br.ReadBit(); br.ReadBit(); // bOpen/bClose/bReliable - not needed
-		uint32_t chIndex = br.ReadBits(10);
-		br.ReadBits(10); // ChSequence - not needed
-		if (chIndex != 0) // not the control channel - actor channels aren't understood yet
-			return result;
-
-		uint32_t combined = br.ReadBits(8);
-		uint32_t remainder = (combined >> 6) & 0x3;
-		uint32_t quotient = br.ReadBits(7);
-		uint32_t contentBytes = quotient * 4 + remainder;
-		if (contentBytes == 0 || (uint32_t)br.RemainingBits() < contentBytes * 8)
-			return result;
-
-		int contentEnd = br.GetBitPos() + (int)contentBytes * 8;
-		while (br.GetBitPos() < contentEnd)
+		int totalBits = size * 8;
+		for (int bitoff = 0; bitoff + 8 <= totalBits; bitoff++)
 		{
-			std::string s = br.ReadString();
-			if (br.GetBitPos() > contentEnd) // overran - the rest wasn't really a string, stop
-				break;
-			result.push_back(std::move(s));
+			// A fresh reader byte-aligned to bitoff, with only the sub-byte remainder skipped -
+			// avoids overflowing ReadBits' 32-bit accumulator for a large bitoff.
+			int byteOff = bitoff / 8;
+			int subBit = bitoff % 8;
+			BitReader br(data + byteOff, size - byteOff);
+			if (subBit)
+				br.ReadBits(subBit);
+
+			uint32_t b0 = br.ReadBits(8);
+			uint32_t val = b0 & 0x3F;
+			int shift = 6;
+			bool cont = ((b0 >> 6) & 1) != 0;
+			bool ok = true;
+			for (int guard = 0; cont && guard < 4; guard++)
+			{
+				if (br.RemainingBits() < 8) { ok = false; break; }
+				uint32_t bN = br.ReadBits(8);
+				val |= (bN & 0x7F) << shift;
+				shift += 7;
+				cont = ((bN >> 7) & 1) != 0;
+			}
+			if (!ok || val < prefix.size() + 1 || val > 200)
+				continue;
+			if ((uint32_t)br.RemainingBits() < val * 8)
+				continue;
+
+			std::string text;
+			bool allPrintable = true;
+			for (uint32_t i = 0; i < val; i++)
+			{
+				uint8_t c = (uint8_t)br.ReadBits(8);
+				if (i == val - 1)
+				{
+					if (c != 0) allPrintable = false; // must end in a null terminator
+				}
+				else
+				{
+					if (c < 0x20 || c > 0x7e) allPrintable = false;
+					else text.push_back((char)c);
+				}
+			}
+			if (allPrintable && text.size() >= prefix.size() && text.compare(0, prefix.size(), prefix) == 0)
+			{
+				outText = text;
+				return true;
+			}
 		}
-		return result;
+		return false;
 	}
 
 	// Builds our reply once the server's WELCOME arrives: a "JOIN" message in a reliable
@@ -519,18 +542,15 @@ void RemoteConnection::Tick(float elapsed)
 			// whatever comes back afterward via the normal receive logging above.
 			if (sentLoginReply && !sentJoin && !acked)
 			{
-				for (const std::string& s : ParseControlBunchStrings((const uint8_t*)buffer, received))
+				std::string welcome;
+				if (FindStringWithPrefix((const uint8_t*)buffer, received, "WELCOME ", welcome))
 				{
-					if (s.rfind("WELCOME ", 0) == 0)
-					{
-						sentJoin = true;
-						std::vector<uint8_t> joinPacket = BuildJoinPacket(nextOutgoingPacketId++, packetId, nextChSequence++);
-						int sent = send(handle, (const char*)joinPacket.data(), (int)joinPacket.size(), 0);
-						if (DebugNet())
-							fprintf(stderr, "[Net] RemoteConnection: parsed \"%s\", sent %d-byte JOIN reply -> %d\n", s.c_str(), (int)joinPacket.size(), sent);
-						acked = true; // the JOIN packet above already acks this server packet
-						break;
-					}
+					sentJoin = true;
+					std::vector<uint8_t> joinPacket = BuildJoinPacket(nextOutgoingPacketId++, packetId, nextChSequence++);
+					int sent = send(handle, (const char*)joinPacket.data(), (int)joinPacket.size(), 0);
+					if (DebugNet())
+						fprintf(stderr, "[Net] RemoteConnection: parsed \"%s\", sent %d-byte JOIN reply -> %d\n", welcome.c_str(), (int)joinPacket.size(), sent);
+					acked = true; // the JOIN packet above already acks this server packet
 				}
 			}
 
