@@ -75,12 +75,13 @@ public:
 	void ClientTravel(const std::string& URL, ETravelType travelType, bool transferItems);
 	UnrealURL GetDefaultURL(const std::string& map);
 	void LoadEntryMap();
-	void LoadMap(const UnrealURL& url, const std::map<std::string, std::string>& travelInfo = {});
+	void LoadMap(const UnrealURL& url, const std::map<std::string, std::string>& travelInfo = {}, bool isNetworkClient = false);
 	void LoadFromSaveFile(const UnrealURL& url);
 	void SaveGameToSlot(int32_t slotNum, const std::string& saveDescription) const;
 	void UnloadMap();
 	void LoginPlayer();
 	void PossessSavedPlayer();
+	void PossessNetworkActor(UPlayerPawn* pawn);
 
 	UObject* FindObject(NameString name, NameString className);
 

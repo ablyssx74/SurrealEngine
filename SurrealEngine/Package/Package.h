@@ -45,6 +45,16 @@ public:
 
 	std::string GetExportName(int objref);
 
+	// Number of entries in this package's export table - the size of the flat, package-relative
+	// object-index space that RemoteConnection's PackageMap equivalent sums across packages (see
+	// UPackageMap::Compute/ObjectToIndex/IndexToObject in real UT99 source: a connection-wide object
+	// index is just a running sum of each known package's own export count, in USES-message order).
+	int GetExportCount() const { return (int)ExportTable.size(); }
+
+	// The package's 16-byte GUID, as stored in its header - used to cross-check against the
+	// GUID= a server's USES message announced for this package.
+	const uint8_t* GetGuid() const { return Guid; }
+
 	template<class T> Array<T*> GetAllObjects();
 
 private:

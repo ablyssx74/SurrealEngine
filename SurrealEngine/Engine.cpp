@@ -680,7 +680,7 @@ void Engine::UnloadMap()
 	// GC::Collect();
 }
 
-void Engine::LoadMap(const UnrealURL& url, const std::map<std::string, std::string>& travelInfo)
+void Engine::LoadMap(const UnrealURL& url, const std::map<std::string, std::string>& travelInfo, bool isNetworkClient)
 {
 	ClientTravelInfo.URL.Clear();
 
@@ -711,7 +711,7 @@ void Engine::LoadMap(const UnrealURL& url, const std::map<std::string, std::stri
 	if (LaunchInfo.ue1Version > 219)
 		LevelInfo->MinNetVersion() = LaunchInfo.gameVersionString;
 	LevelInfo->bHighDetailMode() = true;
-	LevelInfo->NetMode() = 0; // NM_StandAlone
+	LevelInfo->NetMode() = isNetworkClient ? NM_Client : 0 /* NM_StandAlone */;
 	LevelInfo->DefaultTexture() = engine->DefaultTexture;
 
 	LevelInfo->URL = url;
@@ -732,29 +732,50 @@ void Engine::LoadMap(const UnrealURL& url, const std::map<std::string, std::stri
 
 	LinkActorsToLevel();
 
-	// Find the game info class
-	UClass* gameInfoClass = packages->FindClass(LevelInfo->URL.GetOption("game"));
-	if (!gameInfoClass)
-		gameInfoClass = LevelInfo->DefaultGameType();
-	if (!gameInfoClass)
-		gameInfoClass = packages->FindClass(packages->GetIniValue("system", "Engine.Engine", "DefaultGame"));
-	if (!gameInfoClass)
-		gameInfoClass = packages->FindClass("Botpack.DeathMatchPlus");
-	if (!gameInfoClass)
-		Exception::Throw("Could not find any gameinfo class!");
+	if (isNetworkClient)
+	{
+		// A network client never runs GameInfo/InitGame itself - that's server-only (real UT99:
+		// UGameEngine::LoadMap only spawns GameInfo "if (GLevel->IsServer())"). It also destroys
+		// every non-static, non-bNoDelete actor it just loaded from the map file before BeginPlay
+		// runs, since those are dynamic actors (pawns, projectiles, already-taken pickups, etc.)
+		// that only exist because the level file's editor-placed snapshot doesn't reflect the
+		// server's actual live game state - they'll be recreated (or not) from real actor-channel
+		// replication instead. Static/bNoDelete actors (geometry, lights, movers, triggers) are
+		// assumed identical to the server's copy since both loaded the same package, and are left
+		// alone. UActor::Destroy() already no-ops for bStatic()/bNoDelete() actors, so this can
+		// call it unconditionally instead of duplicating that check here.
+		for (UActor* actor : Level->Actors)
+			if (actor)
+				actor->Destroy();
+	}
 
-	// Spawn GameInfo actor
-	GameInfo = UObject::Cast<UGameInfo>(LevelPackage->NewObject("gameinfo", gameInfoClass, ObjectFlags::NoFlags));
-	GameInfo->XLevel() = Level;
-	GameInfo->Level() = LevelInfo;
-	Level->Collision.AddToCollision(GameInfo);
-	GameInfo->Tag() = gameInfoClass->Name;
-	GameInfo->bTicked() = false;
-	GameInfo->InitActorZone();
-	GameInfo->Index = (int)Level->Actors.size();
-	Level->Actors.push_back(GameInfo);
+	// Find the game info class and spawn it - server-only; GameInfo stays null for a network client.
+	UClass* gameInfoClass = nullptr;
+	if (!isNetworkClient)
+	{
+		gameInfoClass = packages->FindClass(LevelInfo->URL.GetOption("game"));
+		if (!gameInfoClass)
+			gameInfoClass = LevelInfo->DefaultGameType();
+		if (!gameInfoClass)
+			gameInfoClass = packages->FindClass(packages->GetIniValue("system", "Engine.Engine", "DefaultGame"));
+		if (!gameInfoClass)
+			gameInfoClass = packages->FindClass("Botpack.DeathMatchPlus");
+		if (!gameInfoClass)
+			Exception::Throw("Could not find any gameinfo class!");
 
-	LevelInfo->Game() = GameInfo;
+		// Spawn GameInfo actor
+		GameInfo = UObject::Cast<UGameInfo>(LevelPackage->NewObject("gameinfo", gameInfoClass, ObjectFlags::NoFlags));
+		GameInfo->XLevel() = Level;
+		GameInfo->Level() = LevelInfo;
+		Level->Collision.AddToCollision(GameInfo);
+		GameInfo->Tag() = gameInfoClass->Name;
+		GameInfo->bTicked() = false;
+		GameInfo->InitActorZone();
+		GameInfo->Index = (int)Level->Actors.size();
+		Level->Actors.push_back(GameInfo);
+
+		LevelInfo->Game() = GameInfo;
+	}
 
 	if (!LevelInfo->bBegunPlay())
 	{
@@ -770,9 +791,12 @@ void Engine::LoadMap(const UnrealURL& url, const std::map<std::string, std::stri
 		size_t loadActorCount = Level->Actors.size();
 
 		LevelInfo->bStartup() = true;
-		CallEvent(GameInfo, EventName::InitGame, { ExpressionValue::StringValue(options), ExpressionValue::Variable(&error, stringProp) });
-		if (!error.empty())
-			Exception::Throw("InitGame failed: " + error);
+		if (GameInfo) // null for a network client - InitGame is server-only
+		{
+			CallEvent(GameInfo, EventName::InitGame, { ExpressionValue::StringValue(options), ExpressionValue::Variable(&error, stringProp) });
+			if (!error.empty())
+				Exception::Throw("InitGame failed: " + error);
+		}
 
 		// Note: the events may spawn actors. We can't use iterators here.
 		for (size_t i = 0; i < loadActorCount; i++) { if (Level->Actors[i]) CallEvent(Level->Actors[i], EventName::PreBeginPlay); }
@@ -888,6 +912,20 @@ void Engine::PossessSavedPlayer()
 	CallEvent(viewport->Actor(), EventName::Possess);
 
 	render->OnMapLoaded();
+}
+
+// Possesses a PlayerPawn that RemoteConnection received over the network as our own (see
+// RemoteConnection.h/.cpp) - the same viewport-assignment sequence LoginPlayer/PossessSavedPlayer
+// already use for a locally-spawned pawn, just without any of the local login/travel machinery
+// (that pawn was already spawned and initialized by the server, not by us).
+void Engine::PossessNetworkActor(UPlayerPawn* pawn)
+{
+	if (!pawn || !viewport)
+		return;
+
+	viewport->Actor() = pawn;
+	viewport->Actor()->Player() = viewport;
+	CallEvent(viewport->Actor(), EventName::Possess);
 }
 
 void Engine::SaveGameToSlot(int32_t slotNum, const std::string& saveDescription) const

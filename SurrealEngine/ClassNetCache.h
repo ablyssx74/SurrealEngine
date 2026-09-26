@@ -41,8 +41,11 @@ public:
 
 	// Looks up the field a given wire index refers to, searching this class's own fields first and
 	// then walking up to superclasses as needed (an index can belong to any ancestor). Returns
-	// nullptr for an index that isn't a real field of this class or any of its superclasses (e.g.
-	// past GetMaxIndex(), which real UE1 traffic uses as the "no more replicated fields" sentinel).
+	// nullptr for an index that isn't a real field of this class or any of its superclasses. Real
+	// UE1 doesn't send an explicit "no more replicated fields" index - the property stream just
+	// ends when a bunch's content bits run out mid-read, which is detected separately (see
+	// BitReader::IsError() in RemoteConnection.cpp) - but this is a harmless extra safety net if a
+	// RepIndex is ever out of range for some other reason.
 	UField* GetFromIndex(int index) const;
 
 	// The reverse of GetFromIndex - mainly useful for tests/diagnostics.

@@ -2,14 +2,133 @@
 #include "Precomp.h"
 #include "RemoteConnection.h"
 #include "Engine.h"
+#include "ClassNetCache.h"
 #include "Package/PackageManager.h"
+#include "Package/Package.h"
+#include "Packages/Core/UObject.h"
+#include "Packages/Core/UClass.h"
+#include "Packages/Core/UEnum.h"
+#include "Packages/Core/Properties/UProperty.h"
+#include "Packages/Core/Properties/UByteProperty.h"
+#include "Packages/Core/Properties/UIntProperty.h"
+#include "Packages/Core/Properties/UFloatProperty.h"
+#include "Packages/Core/Properties/UBoolProperty.h"
+#include "Packages/Core/Properties/UObjectProperty.h"
+#include "Packages/Core/Properties/UStructProperty.h"
+#include "Packages/Core/UFunction.h"
+#include "Packages/Engine/Actors/UActor.h"
+#include "Packages/Engine/Actors/Pawn/UPlayerPawn.h"
+#include "Packages/Engine/Actors/Info/ULevelInfo.h"
+#include "Packages/Engine/Resources/Level/ULevel.h"
+#include "Math/rotator.h"
 #include "Utils/File.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
+#include <cmath>
+#include <algorithm>
 #include <vector>
 #include <string>
+
+// BitReader is used both by the packet/bunch parser below (anonymous namespace) and by
+// RemoteConnection's actor/property decoder (RemoteConnection.h declares it as an incomplete type,
+// so it must live at file scope here rather than inside the anonymous namespace, or the two
+// declarations would refer to unrelated types).
+//
+// LSB-first bit reader matching UE1's wire format - see the BitWriter comment below for how this
+// was derived. ArIsError-style overflow tracking (the `error` flag) mirrors real UT99's
+// FBitReader::SerializeBits/SerializeInt (Core/Src/UnBits.cpp in real UT99 source): a read that
+// would run past the declared bit length sets `error` and returns 0 instead of reading garbage.
+// This is what lets actor-channel property decoding detect "no more replicated fields in this
+// bunch" the same way the real engine does - confirmed from source this session that the writer
+// never sends an explicit terminator; the reader just runs out of bits mid-ReadInt.
+class BitReader
+{
+public:
+	BitReader(const uint8_t* data, int sizeBytes) : data(data), sizeBits(sizeBytes * 8) {}
+
+	// Same as above, but caps the logical bit length below what sizeBytes*8 would allow - for
+	// carving an exact-bit-length span (e.g. one bunch's content) out of a larger buffer, matching
+	// how a real FInBunch is an exact bit count, not byte-rounded.
+	BitReader(const uint8_t* data, int sizeBytes, int exactSizeBits) : data(data), sizeBits(std::min(sizeBytes * 8, exactSizeBits)) {}
+
+	int RemainingBits() const { return sizeBits - bitPos; }
+	int GetBitPos() const { return bitPos; }
+	bool IsError() const { return error; }
+
+	int ReadBit()
+	{
+		if (bitPos >= sizeBits)
+		{
+			error = true;
+			return 0;
+		}
+		int bit = (data[bitPos / 8] >> (bitPos % 8)) & 1;
+		bitPos++;
+		return bit;
+	}
+
+	uint32_t ReadBits(int count)
+	{
+		uint32_t value = 0;
+		for (int i = 0; i < count; i++)
+			value |= (uint32_t)ReadBit() << i;
+		return value;
+	}
+
+	// The reader side of BitWriter::WriteInt below - see its comment for the algorithm. Tracks the
+	// exact same running total the writer did, so it independently knows when to stop. Sets `error`
+	// (without returning early - matches real FBitReader::SerializeInt, which keeps looping so Pos
+	// ends up in the same place a full decode would have left it) if the value can't be completed
+	// within the remaining bits.
+	uint32_t ReadInt(uint32_t valueMax)
+	{
+		uint32_t value = 0;
+		for (uint32_t mask = 1; value + mask < valueMax && mask != 0; mask <<= 1)
+		{
+			if (ReadBit())
+				value |= mask;
+		}
+		return value;
+	}
+
+	uint32_t ReadCompactIndex()
+	{
+		uint32_t b0 = ReadBits(8);
+		uint32_t value = b0 & 0x3F;
+		int shift = 6;
+		bool cont = ((b0 >> 6) & 1) != 0;
+		for (int guard = 0; cont && guard < 4; guard++)
+		{
+			uint32_t bN = ReadBits(8);
+			value |= (bN & 0x7F) << shift;
+			shift += 7;
+			cont = ((bN >> 7) & 1) != 0;
+		}
+		return value;
+	}
+
+	std::string ReadString()
+	{
+		uint32_t len = ReadCompactIndex();
+		std::string s;
+		s.reserve(len);
+		for (uint32_t i = 0; i < len; i++)
+		{
+			uint8_t c = (uint8_t)ReadBits(8);
+			if (c != 0)
+				s.push_back((char)c);
+		}
+		return s;
+	}
+
+private:
+	const uint8_t* data;
+	int sizeBits;
+	int bitPos = 0;
+	bool error = false;
+};
 
 #ifdef WIN32
 #include <WinSock2.h>
@@ -134,80 +253,6 @@ namespace
 
 	private:
 		std::vector<uint8_t> bytes;
-		int bitPos = 0;
-	};
-
-	class BitReader
-	{
-	public:
-		BitReader(const uint8_t* data, int sizeBytes) : data(data), sizeBits(sizeBytes * 8) {}
-
-		int RemainingBits() const { return sizeBits - bitPos; }
-		int GetBitPos() const { return bitPos; }
-
-		int ReadBit()
-		{
-			if (bitPos >= sizeBits)
-				return 0;
-			int bit = (data[bitPos / 8] >> (bitPos % 8)) & 1;
-			bitPos++;
-			return bit;
-		}
-
-		uint32_t ReadBits(int count)
-		{
-			uint32_t value = 0;
-			for (int i = 0; i < count; i++)
-				value |= (uint32_t)ReadBit() << i;
-			return value;
-		}
-
-		// The reader side of WriteInt above - see its comment for the algorithm. Tracks the exact
-		// same running total the writer did, so it independently knows when to stop.
-		uint32_t ReadInt(uint32_t valueMax)
-		{
-			uint32_t value = 0;
-			for (uint32_t mask = 1; value + mask < valueMax && mask != 0; mask <<= 1)
-			{
-				if (ReadBit())
-					value |= mask;
-			}
-			return value;
-		}
-
-		uint32_t ReadCompactIndex()
-		{
-			uint32_t b0 = ReadBits(8);
-			uint32_t value = b0 & 0x3F;
-			int shift = 6;
-			bool cont = ((b0 >> 6) & 1) != 0;
-			for (int guard = 0; cont && guard < 4; guard++)
-			{
-				uint32_t bN = ReadBits(8);
-				value |= (bN & 0x7F) << shift;
-				shift += 7;
-				cont = ((bN >> 7) & 1) != 0;
-			}
-			return value;
-		}
-
-		std::string ReadString()
-		{
-			uint32_t len = ReadCompactIndex();
-			std::string s;
-			s.reserve(len);
-			for (uint32_t i = 0; i < len; i++)
-			{
-				uint8_t c = (uint8_t)ReadBits(8);
-				if (c != 0)
-					s.push_back((char)c);
-			}
-			return s;
-		}
-
-	private:
-		const uint8_t* data;
-		int sizeBits;
 		int bitPos = 0;
 	};
 
@@ -667,6 +712,7 @@ void RemoteConnection::HandlePackageListMessage(const std::string& text)
 	std::string guidHex = extract("GUID=");
 	std::string pkgName = extract("PKG=");
 	std::string sizeStr = extract("SIZE=");
+	std::string genStr = extract("GEN=");
 	std::string fileName = extract("FNAME=");
 	if (guidHex.size() != 32 || pkgName.empty() || fileName.empty())
 	{
@@ -674,6 +720,16 @@ void RemoteConnection::HandlePackageListMessage(const std::string& text)
 			fprintf(stderr, "[Net] RemoteConnection: couldn't parse package requirement out of \"%s\" - ignoring\n", text.c_str());
 		return;
 	}
+
+	// Every USES package - present locally or not - defines a slot in this connection's flat
+	// object-index space (see RemotePackageMapEntry's comment), in the exact order these messages
+	// arrive. This has to be tracked regardless of local presence: skipping an already-present
+	// package here would shift the index of every package that comes after it.
+	RemotePackageMapEntry mapEntry;
+	mapEntry.guidHex = guidHex;
+	mapEntry.packageName = pkgName;
+	mapEntry.remoteGeneration = (uint32_t)strtoul(genStr.c_str(), nullptr, 10);
+	packageMapList.push_back(mapEntry);
 
 	if (engine && engine->packages && engine->packages->HasPackageFile(pkgName))
 	{
@@ -755,6 +811,368 @@ void RemoteConnection::FinishDownload(int chIndex, bool success)
 	StartNextDownload();
 }
 
+// Reimplements UPackageMap::Compute() (real UT99 source, UnCoreNet.cpp): resolves every package in
+// packageMapList to a loaded Package* and assigns it a flat objectBase, which is the running sum of
+// every earlier package's own export-table size. Returns false the moment any package in the list
+// isn't locally loadable - real UT99 never builds this mapping until every USES package has been
+// downloaded, so this doesn't try to cope with a partially-resolved list either (an unresolvable
+// package mid-list would make every later package's index wrong anyway).
+bool RemoteConnection::ResolvePackageMap()
+{
+	if (!engine || !engine->packages)
+		return false;
+
+	int base = 0;
+	for (RemotePackageMapEntry& entry : packageMapList)
+	{
+		if (!entry.package)
+		{
+			if (!engine->packages->HasPackageFile(entry.packageName))
+				return false;
+			entry.package = engine->packages->GetPackage(entry.packageName);
+			if (!entry.package)
+				return false;
+		}
+		entry.objectBase = base;
+		base += entry.package->GetExportCount();
+	}
+	return true;
+}
+
+int RemoteConnection::PackageMapMaxObjectIndex() const
+{
+	if (packageMapList.empty() || !packageMapList.back().package)
+		return 0;
+	return packageMapList.back().objectBase + packageMapList.back().package->GetExportCount();
+}
+
+// Reimplements UPackageMap::IndexToObject (UnCoreNet.cpp): walk the package list in order,
+// subtracting each package's export count, until flatIndex lands inside one - then resolve it
+// through that package's own export table. Assumes ResolvePackageMap() already succeeded; returns
+// nullptr for an out-of-range index or an unresolved package.
+UObject* RemoteConnection::PackageMapIndexToObject(int flatIndex) const
+{
+	if (flatIndex < 0)
+		return nullptr;
+
+	for (const RemotePackageMapEntry& entry : packageMapList)
+	{
+		if (!entry.package)
+			return nullptr;
+		int count = entry.package->GetExportCount();
+		if (flatIndex < count)
+			return entry.package->GetUObject(flatIndex + 1); // Package::GetUObject uses a 1-based export convention
+		flatIndex -= count;
+	}
+	return nullptr;
+}
+
+// Reimplements UPackageMapLevel::SerializeObject's read path (UnNetDrv.cpp): one bit selects
+// between a live actor-channel reference and a static package-object reference (see
+// RemoteConnection.h's DecodeObjectRef comment).
+UObject* RemoteConnection::DecodeObjectRef(BitReader& br)
+{
+	constexpr uint32_t MAX_CHANNELS_LOCAL = 1023; // matches MAX_CHANNELS below - kept in sync there
+
+	if (br.ReadBit())
+	{
+		// Dynamic actor reference (or None): a channel index on this connection, not a package
+		// object index - real UT99 resolves this to whichever actor currently owns that channel.
+		uint32_t chIndex = br.ReadInt(MAX_CHANNELS_LOCAL);
+		if (br.IsError() || chIndex == 0)
+			return nullptr;
+		auto it = activeActorChannels.find((int)chIndex);
+		return it != activeActorChannels.end() ? static_cast<UObject*>(it->second) : nullptr;
+	}
+	else
+	{
+		// Static object reference: a flat index into the connection's known packages.
+		uint32_t index = br.ReadInt((uint32_t)PackageMapMaxObjectIndex());
+		if (br.IsError())
+			return nullptr;
+		return PackageMapIndexToObject((int)index);
+	}
+}
+
+// Reimplements the per-ValueType NetSerializeItem formats confirmed against real UT99 source
+// (Core/Src/UnProp.cpp) - see RemoteConnection.h's comment on this function for what "false" means.
+bool RemoteConnection::DecodePropertyValue(BitReader& br, UProperty* prop, void* elementPtr)
+{
+	switch (prop->ValueType)
+	{
+	case ExpressionValueType::ValueByte:
+	{
+		UByteProperty* byteProp = UObject::TryCast<UByteProperty>(prop);
+		int bits = (byteProp && byteProp->EnumType) ? std::max(1, (int)std::ceil(std::log2((double)std::max<size_t>(2, byteProp->EnumType->ElementNames.size())))) : 8;
+		*(uint8_t*)elementPtr = (uint8_t)br.ReadBits(bits);
+		return true;
+	}
+	case ExpressionValueType::ValueInt:
+		*(int32_t*)elementPtr = (int32_t)br.ReadBits(32);
+		return true;
+	case ExpressionValueType::ValueFloat:
+	{
+		uint32_t bits = br.ReadBits(32);
+		*(float*)elementPtr = *reinterpret_cast<float*>(&bits);
+		return true;
+	}
+	case ExpressionValueType::ValueBool:
+	{
+		UBoolProperty* boolProp = UObject::TryCast<UBoolProperty>(prop);
+		boolProp->SetBool(elementPtr, br.ReadBit() != 0);
+		return true;
+	}
+	case ExpressionValueType::ValueObject:
+		*(UObject**)elementPtr = DecodeObjectRef(br);
+		return true;
+	case ExpressionValueType::ValueVector:
+	{
+		// Compressed varying-width vector (UStructProperty::NetSerializeItem's "Vector" case):
+		// a 4-bit magnitude-class selector, then each axis biased into that many bits.
+		uint32_t bits = br.ReadInt(16);
+		int bias = 1 << (bits + 1);
+		uint32_t maxVal = 1u << (bits + 2);
+		uint32_t dx = br.ReadInt(maxVal), dy = br.ReadInt(maxVal), dz = br.ReadInt(maxVal);
+		*(vec3*)elementPtr = vec3((float)((int)dx - bias), (float)((int)dy - bias), (float)((int)dz - bias));
+		return true;
+	}
+	case ExpressionValueType::ValueRotator:
+	{
+		// Per-axis "is nonzero" bit gates whether a byte (the axis's high 8 bits) follows.
+		Rotator r(0, 0, 0);
+		if (br.ReadBit()) r.Pitch = ((int)br.ReadBits(8)) << 8;
+		if (br.ReadBit()) r.Yaw = ((int)br.ReadBits(8)) << 8;
+		if (br.ReadBit()) r.Roll = ((int)br.ReadBits(8)) << 8;
+		*(Rotator*)elementPtr = r;
+		return true;
+	}
+	case ExpressionValueType::ValueStruct:
+	{
+		UStructProperty* structProp = UObject::TryCast<UStructProperty>(prop);
+		if (structProp && structProp->Struct && structProp->Struct->Name == "Plane")
+		{
+			// 4x raw 16-bit values (X,Y,Z,W), uncompressed.
+			float* p = (float*)elementPtr;
+			for (int i = 0; i < 4; i++)
+				p[i] = (float)(int16_t)br.ReadBits(16);
+			return true;
+		}
+		// Name/array/map and any other struct type aren't handled yet (see the class doc comment's
+		// Deferred items) - the caller must stop decoding the rest of this bunch.
+		return false;
+	}
+	default:
+		return false;
+	}
+}
+
+// Once every USES package is confirmed present locally, loads the map WELCOME named as a real
+// network client (reimplements UGameEngine::LoadMap's Pending-level path - real UT99 source,
+// UnGame.cpp - via Engine::LoadMap's isNetworkClient flag: same .unr every client and the server
+// itself loaded, no local GameInfo/InitGame, non-static/non-bNoDelete actors torn down since
+// they're not the server's live copies). No-ops if a map was already loaded for this connection, or
+// if any required package still isn't resolvable (see ResolvePackageMap) - the latter is a known,
+// explicitly out-of-scope gap (downloaded packages aren't loadable by PackageManager yet).
+void RemoteConnection::TryLoadNetworkMap(const std::string& levelName)
+{
+	if (loadedNetworkMap || levelName.empty() || !engine || !engine->packages)
+		return;
+
+	if (!ResolvePackageMap())
+	{
+		if (DebugNet())
+			fprintf(stderr, "[Net] RemoteConnection: not every required package is available locally yet - can't load \"%s\" as a network client\n", levelName.c_str());
+		return;
+	}
+
+	UnrealURL url;
+	url.Map = levelName;
+	if (url.Map.find('.') == std::string::npos)
+		url.Map += "." + engine->packages->GetMapExtension();
+
+	try
+	{
+		engine->LoadMap(url, {}, /*isNetworkClient=*/true);
+		loadedNetworkMap = true;
+		if (DebugNet())
+			fprintf(stderr, "[Net] RemoteConnection: loaded \"%s\" as a network client\n", url.Map.c_str());
+	}
+	catch (const std::exception& e)
+	{
+		if (DebugNet())
+			fprintf(stderr, "[Net] RemoteConnection: failed to load \"%s\" as a network client: %s\n", url.Map.c_str(), e.what());
+	}
+}
+
+// Treats the first dynamically-spawned PlayerPawn received after JOIN as our own and possesses it -
+// see RemoteConnection.h's class doc comment for why this is a heuristic rather than the exact real
+// mechanism (UNetConnection::HandleClientPlayer in real UT99 source flips this from Actor->
+// bNetOwner, whose own trigger wasn't fully pinned down from source this session).
+void RemoteConnection::PossessIfOwnPawn(UActor* actor)
+{
+	if (possessedOwnPawn || !engine)
+		return;
+
+	UPlayerPawn* pawn = UObject::TryCast<UPlayerPawn>(actor);
+	if (!pawn)
+		return;
+
+	possessedOwnPawn = true;
+	engine->PossessNetworkActor(pawn);
+	if (DebugNet())
+		fprintf(stderr, "[Net] RemoteConnection: possessing \"%s\" as our own pawn\n", pawn->Name.ToString().c_str());
+}
+
+// Decodes one actor-channel bunch (reimplements UActorChannel::ReceivedBunch - real UT99 source,
+// UnChan.cpp): a fresh channel's bunch must be bOpen and resolves an object reference to either an
+// already-loaded actor or a class to dynamically spawn (see DecodeObjectRef); either way, every
+// bunch on an established channel then carries zero or more RepIndex-tagged property values (see
+// ClassNetCache.h) or RPC calls, back to back, until the bunch's content bits run out.
+void RemoteConnection::HandleActorBunch(const uint8_t* packetData, int packetSize, int chIndex, bool bOpen, bool bClose, int contentBitOffset, int contentBits)
+{
+	int byteOff = contentBitOffset / 8;
+	int subBit = contentBitOffset % 8;
+	if (byteOff >= packetSize)
+		return;
+
+	BitReader br(packetData + byteOff, packetSize - byteOff, subBit + contentBits);
+	if (subBit)
+		br.ReadBits(subBit);
+
+	UActor* actor = nullptr;
+	auto existing = activeActorChannels.find(chIndex);
+	if (existing != activeActorChannels.end())
+	{
+		actor = existing->second;
+	}
+	else
+	{
+		if (!bOpen)
+			return; // a channel we haven't seen before must be introduced by its bOpen bunch
+
+		UObject* obj = DecodeObjectRef(br);
+		if (br.IsError())
+			return;
+
+		actor = UObject::TryCast<UActor>(obj);
+		if (!actor)
+		{
+			UClass* spawnClass = UObject::TryCast<UClass>(obj);
+			if (!spawnClass)
+			{
+				if (DebugNet())
+					fprintf(stderr, "[Net] RemoteConnection: actor channel %d bOpen resolved to neither an actor nor a class - ignoring\n", chIndex);
+				return;
+			}
+
+			// Dynamic spawn: a raw, uncompressed FVector follows (3x 32-bit floats via a plain
+			// Ar << X << Y << Z in real UT99 source - NOT the compressed vector encoding that only
+			// applies inside the property stream below).
+			uint32_t bx = br.ReadBits(32), by = br.ReadBits(32), bz = br.ReadBits(32);
+			if (br.IsError())
+				return;
+			vec3 location(*reinterpret_cast<float*>(&bx), *reinterpret_cast<float*>(&by), *reinterpret_cast<float*>(&bz));
+
+			if (!engine || !engine->LevelInfo)
+				return;
+			actor = engine->LevelInfo->Spawn(spawnClass, std::nullopt, std::nullopt, location, Rotator(0, 0, 0));
+			if (!actor)
+			{
+				if (DebugNet())
+					fprintf(stderr, "[Net] RemoteConnection: failed to spawn \"%s\" for actor channel %d\n", spawnClass->Name.ToString().c_str(), chIndex);
+				return;
+			}
+			if (DebugNet())
+				fprintf(stderr, "[Net] RemoteConnection: actor channel %d spawned \"%s\"\n", chIndex, spawnClass->Name.ToString().c_str());
+		}
+		else if (DebugNet())
+		{
+			fprintf(stderr, "[Net] RemoteConnection: actor channel %d references existing actor \"%s\"\n", chIndex, actor->Name.ToString().c_str());
+		}
+
+		activeActorChannels[chIndex] = actor;
+		actorChannelsByActor[actor] = chIndex;
+		PossessIfOwnPawn(actor);
+	}
+
+	if (!actor || !actor->Class)
+		return;
+
+	ClassNetCache* classCache = ClassNetCache::Get(actor->Class);
+	if (!classCache)
+		return;
+
+	uint32_t repIndex = br.ReadInt((uint32_t)classCache->GetMaxIndex());
+	UField* field = br.IsError() ? nullptr : classCache->GetFromIndex((int)repIndex);
+	while (field)
+	{
+		UProperty* prop = UObject::TryCast<UProperty>(field);
+		if (prop)
+		{
+			int element = 0;
+			if (prop->ArrayDimension != 1)
+				element = (int)br.ReadBits(8);
+
+			void* elementPtr = prop->GetElement(actor->GetProperty(prop), element);
+			if (!DecodePropertyValue(br, prop, elementPtr))
+			{
+				if (DebugNet())
+					fprintf(stderr, "[Net] RemoteConnection: actor channel %d: unsupported property type for \"%s\" - abandoning rest of this bunch\n", chIndex, prop->Name.ToString().c_str());
+				break;
+			}
+		}
+		else
+		{
+			// RPC call: parse (and discard) parameters to stay bit-aligned - actually invoking
+			// UnrealScript functions from network RPCs is deferred (see the class doc comment).
+			UFunction* function = UObject::TryCast<UFunction>(field);
+			if (!function)
+				break;
+
+			bool paramError = false;
+			for (UProperty* param : function->Properties)
+			{
+				if (!AnyFlags(param->PropFlags, PropertyFlags::Parm) || AnyFlags(param->PropFlags, PropertyFlags::ReturnParm))
+					continue;
+
+				bool isBool = param->ValueType == ExpressionValueType::ValueBool;
+				bool present = isBool || br.ReadBit() != 0;
+				if (br.IsError())
+				{
+					paramError = true;
+					break;
+				}
+				if (present)
+				{
+					uint8_t scratch[16] = {};
+					if (!DecodePropertyValue(br, param, scratch))
+					{
+						paramError = true;
+						break;
+					}
+				}
+			}
+			if (paramError)
+			{
+				if (DebugNet())
+					fprintf(stderr, "[Net] RemoteConnection: actor channel %d: couldn't parse parameters for RPC \"%s\" - abandoning rest of this bunch\n", chIndex, function->Name.ToString().c_str());
+				break;
+			}
+		}
+
+		if (br.IsError())
+			break;
+		repIndex = br.ReadInt((uint32_t)classCache->GetMaxIndex());
+		field = br.IsError() ? nullptr : classCache->GetFromIndex((int)repIndex);
+	}
+
+	if (bClose)
+	{
+		activeActorChannels.erase(chIndex);
+		actorChannelsByActor.erase(actor);
+	}
+}
+
 void RemoteConnection::Tick(float elapsed)
 {
 	if (handle == remote_invalid_socket_value)
@@ -813,8 +1231,14 @@ void RemoteConnection::Tick(float elapsed)
 					continue;
 				}
 
+				if (bunch.chType == CHTYPE_Actor)
+				{
+					HandleActorBunch((const uint8_t*)buffer, received, bunch.chIndex, bunch.bOpen, bunch.bClose, bunch.contentBitOffset, bunch.contentBits);
+					continue;
+				}
+
 				if (bunch.chIndex != 0 || bunch.chType != CHTYPE_Control)
-					continue; // only the control channel (index 0) and file channels are understood right now
+					continue; // only the control, file and actor channels are understood right now
 
 				std::vector<std::string> messages = ReadBunchStrings((const uint8_t*)buffer, received, bunch);
 				for (const std::string& text : messages)
@@ -853,11 +1277,10 @@ void RemoteConnection::Tick(float elapsed)
 					// Third step: once the server's WELCOME arrives (after LOGIN, it sends the
 					// required-package list, then WELCOME), tell it we're entering the game. A real
 					// client's JOIN is what makes the server start spawning actors and replicating
-					// real gameplay state - understanding and applying that (an actor-channel
-					// property decoder) is a much bigger and separately-scoped piece of work that
-					// doesn't exist yet, so for now this just gets the message sent and logs
-					// whatever comes back afterward via the control-message logging above (actor
-					// channel bunches are parsed structurally but not yet interpreted).
+					// real gameplay state; once every required package is confirmed present
+					// locally, WELCOME's LEVEL= now also triggers a real network-client-mode level
+					// load (see TryLoadNetworkMap) so there's an actual level for those actor-channel
+					// bunches to populate.
 					else if (sentLoginReply && !sentJoin && text.rfind("WELCOME ", 0) == 0)
 					{
 						sentJoin = true;
@@ -866,6 +1289,15 @@ void RemoteConnection::Tick(float elapsed)
 						if (DebugNet())
 							fprintf(stderr, "[Net] RemoteConnection: parsed \"%s\", sent %d-byte JOIN reply -> %d\n", text.c_str(), (int)joinPacket.size(), sent);
 						acked = true; // the JOIN packet above already acks this server packet
+
+						size_t levelPos = text.find("LEVEL=");
+						if (levelPos != std::string::npos)
+						{
+							levelPos += strlen("LEVEL=");
+							size_t levelEnd = text.find(' ', levelPos);
+							std::string levelName = text.substr(levelPos, levelEnd == std::string::npos ? std::string::npos : levelEnd - levelPos);
+							TryLoadNetworkMap(levelName);
+						}
 					}
 				}
 			}
