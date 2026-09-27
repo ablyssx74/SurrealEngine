@@ -700,6 +700,15 @@ int RemoteConnection::AllocateChSequence(int chIndex)
 	return next++;
 }
 
+int RemoteConnection::AllocateFileChannelIndex()
+{
+	while (knownChannelIndices.count(nextChannelIndex))
+		nextChannelIndex++;
+	int result = nextChannelIndex++;
+	knownChannelIndices.insert(result);
+	return result;
+}
+
 // Parses a "USES GUID=<hex> PKG=<name> FLAGS=<n> SIZE=<n> [GEN=<n>] [REALGEN=<n>] FNAME=<file>"
 // message (one per required package, sent after LOGIN succeeds - format cracked earlier this
 // session from a real capture). Anything this engine doesn't already have a same-named local file
@@ -773,7 +782,7 @@ void RemoteConnection::StartNextDownload()
 	RemoteRequiredPackage pkg = pendingDownloads.front();
 	pendingDownloads.erase(pendingDownloads.begin());
 
-	int chIndex = nextChannelIndex++;
+	int chIndex = AllocateFileChannelIndex();
 	int chSequence = AllocateChSequence(chIndex);
 
 	std::vector<uint8_t> requestPacket = BuildFileChannelRequest(nextOutgoingPacketId++, chIndex, chSequence, pkg.guidHex);
@@ -1270,6 +1279,12 @@ void RemoteConnection::Tick(float elapsed)
 
 			for (const ParsedBunch& bunch : packet.bunches)
 			{
+				// Record every channel index the server ever opens, regardless of type or whether
+				// we otherwise do anything with this bunch - AllocateFileChannelIndex() needs this
+				// to avoid picking an index the server already claimed for something else (e.g. one
+				// of its own actor channels).
+				knownChannelIndices.insert(bunch.chIndex);
+
 				if (bunch.chType == CHTYPE_File)
 				{
 					auto downloadIt = activeDownloads.find(bunch.chIndex);

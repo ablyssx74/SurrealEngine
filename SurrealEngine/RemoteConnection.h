@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <set>
 #include <cstdint>
 
 class Package;
@@ -131,7 +132,8 @@ private:
 	float networkMapRetryCooldown = 0.0f; // seconds until Tick() retries TryLoadNetworkMap again - without this it re-tries (and re-logs the same failure) every single frame while a package download is still in flight, which can take a while
 	bool possessedOwnPawn = false; // true once a locally-owned PlayerPawn has been possessed (see step 8's heuristic in the plan)
 	int nextOutgoingPacketId = 2; // 0 was HELLO, 1 was NETSPEED+LOGIN
-	int nextChannelIndex = 1; // 0 is the control channel; file channels are opened above it
+	int nextChannelIndex = 1; // 0 is the control channel; AllocateFileChannelIndex() searches upward from here
+	std::set<int> knownChannelIndices; // every channel index seen in use on this connection so far, ours or the server's own (see AllocateFileChannelIndex)
 	std::map<int, int> nextChSequenceByChannel; // per channel - ChSequence is scoped to its channel, not global
 	std::vector<RemoteRequiredPackage> pendingDownloads; // known missing, not yet requested
 	std::map<int, RemoteFileDownload> activeDownloads; // chIndex -> download in progress on that channel
@@ -140,6 +142,16 @@ private:
 	std::map<UActor*, int> actorChannelsByActor; // reverse lookup - which channel a dynamic actor is on
 
 	int AllocateChSequence(int chIndex);
+
+	// Picks a channel index for a file-channel request we're about to open, skipping any index
+	// already known to be in use - by us (an existing download) or by the server (any channel
+	// index it's opened on this connection, tracked in knownChannelIndices regardless of channel
+	// type - see Tick()). Without this, a purely-incrementing counter could pick an index the
+	// server had already claimed for one of its own actor channels (confirmed against a real
+	// server: the server opens actor channels starting at low indices immediately after JOIN, so a
+	// naive counter collides with it almost immediately), silently stalling that download at 0%
+	// forever since the request lands on a channel the server considers already taken.
+	int AllocateFileChannelIndex();
 	void HandlePackageListMessage(const std::string& text);
 	void StartNextDownload();
 	void FinishDownload(int chIndex, bool success);
