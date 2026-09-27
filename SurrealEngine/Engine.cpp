@@ -1958,11 +1958,19 @@ void Engine::InputEvent(EInputKey key, EInputType type, int delta)
 		}
 		else if (type == EInputType::IST_Release)
 		{
+			// activeInputButtons/Axes track which physical key maps to which named button/axis
+			// regardless of whether a pawn is currently possessed (see InputCommand) - a network
+			// client can have no possessed pawn yet (see UpdateInput's matching null check), so
+			// releasing a key bound to Fire/AltFire/etc. before that happens must not dereference
+			// a null Actor().
+			UActor* actor = viewport->Actor();
+
 			for (auto it = activeInputButtons.begin(); it != activeInputButtons.end();)
 			{
 				if (it->second == key)
 				{
-					viewport->Actor()->SetBool(it->first, false);
+					if (actor)
+						actor->SetBool(it->first, false);
 					it = activeInputButtons.erase(it);
 				}
 				else
@@ -1975,7 +1983,8 @@ void Engine::InputEvent(EInputKey key, EInputType type, int delta)
 			{
 				if (it->second.Key == key)
 				{
-					viewport->Actor()->SetFloat(it->first, 0.0f);
+					if (actor)
+						actor->SetFloat(it->first, 0.0f);
 					it = activeInputAxes.erase(it);
 				}
 				else
