@@ -169,7 +169,10 @@ void USurrealAudioDevice::SetViewport(UViewport* InViewport)
 
 		if (m_Viewport)
 		{
-			if (m_Viewport->Actor()->Song() && m_Viewport->Actor()->Transition() == MTRAN_None)
+			// A network client can have a viewport with no possessed Actor yet - LoginPlayer()
+			// (which normally guarantees this by the time any Tick/audio code runs) is skipped
+			// entirely for a network join; the pawn only exists once the server replicates it.
+			if (m_Viewport->Actor() && m_Viewport->Actor()->Song() && m_Viewport->Actor()->Transition() == MTRAN_None)
 				m_Viewport->Actor()->Transition() = MTRAN_Instant;
 
 			PlayingSounds.resize(std::min(Channels, m_Device->GetTotalChannels()));
