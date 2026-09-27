@@ -1197,7 +1197,14 @@ void RemoteConnection::Tick(float elapsed)
 		return;
 
 	if (!loadedNetworkMap && !pendingNetworkMapLevel.empty())
-		TryLoadNetworkMap(pendingNetworkMapLevel); // retry - see the comment where this was set
+	{
+		networkMapRetryCooldown -= elapsed;
+		if (networkMapRetryCooldown <= 0.0f)
+		{
+			TryLoadNetworkMap(pendingNetworkMapLevel); // retry - see the comment where this was set
+			networkMapRetryCooldown = 2.0f; // still failing while a package downloads is normal, not worth retrying (or re-logging) every single frame
+		}
+	}
 
 	for (;;)
 	{

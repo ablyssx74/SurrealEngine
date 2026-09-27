@@ -119,6 +119,7 @@ private:
 	bool sentJoin = false;
 	bool loadedNetworkMap = false; // true once WELCOME's LEVEL= has triggered a client-mode LoadMap
 	std::string pendingNetworkMapLevel; // set by TryLoadNetworkMap while it keeps failing, so Tick() can retry (e.g. once missing packages actually finish becoming loadable)
+	float networkMapRetryCooldown = 0.0f; // seconds until Tick() retries TryLoadNetworkMap again - without this it re-tries (and re-logs the same failure) every single frame while a package download is still in flight, which can take a while
 	bool possessedOwnPawn = false; // true once a locally-owned PlayerPawn has been possessed (see step 8's heuristic in the plan)
 	int nextOutgoingPacketId = 2; // 0 was HELLO, 1 was NETSPEED+LOGIN
 	int nextChannelIndex = 1; // 0 is the control channel; file channels are opened above it
