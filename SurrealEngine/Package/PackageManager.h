@@ -53,6 +53,17 @@ public:
 	Package* GetPackage(const NameString& name);
 	Array<NameString> GetPackageNames() const;
 	bool HasPackageFile(const NameString& name) const { return packageFilenames.find(name) != packageFilenames.end(); }
+
+	// Makes a package file just saved to the cache folder (RemoteConnection's file-channel package
+	// downloads - see GetCacheFolderPath) resolvable by name right away, the same as any package
+	// ScanFolder found at startup, instead of only after the next restart re-scans the cache folder
+	// (see ScanPaths). A name a real content folder already claims always wins - this only fills
+	// in a name nothing else has provided a file for.
+	void RegisterDownloadedPackage(const NameString& name, const std::string& filepath)
+	{
+		if (packageFilenames.find(name) == packageFilenames.end())
+			packageFilenames[name] = filepath;
+	}
 	Package* GetSaveInfoPackage(const NameString& saveFolderName);
 	void RemoveSaveInfoPackage(const NameString& saveFolderName);
 	std::map<NameString, Package*> GetSaveInfoPackages() const { return saveInfos; };

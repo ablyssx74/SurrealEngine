@@ -814,10 +814,20 @@ void RemoteConnection::FinishDownload(int chIndex, bool success)
 	bool sizeMatches = download.data.size() == download.package.fileSize;
 	if (success && sizeMatches && engine && engine->packages)
 	{
+		// Saved under the package's own name (e.g. "EpicCustomModels.u"), with its real extension
+		// from the server's FNAME=, not a GUID-named ".uxx" regardless of actual type - a real
+		// UT99 client caches by GUID instead (letting distinct generations of a same-named package
+		// coexist), but this engine already identifies every other package purely by name
+		// everywhere else, so matching that - and registering the result below - is what actually
+		// makes a downloaded package resolvable at all, this session and after a restart (see
+		// RegisterDownloadedPackage/ScanPaths's cache-folder scan) instead of just sitting there as
+		// bytes on disk nothing ever looks at again.
 		std::filesystem::path cacheFolder = engine->packages->GetCacheFolderPath();
 		Directory::create(cacheFolder.string());
-		std::filesystem::path dest = cacheFolder / (download.package.guidHex + ".uxx");
+		std::string extension = std::filesystem::path(download.package.fileName).extension().string();
+		std::filesystem::path dest = cacheFolder / (download.package.packageName + extension);
 		File::write_all_bytes(dest.string(), download.data.data(), download.data.size());
+		engine->packages->RegisterDownloadedPackage(download.package.packageName, dest.string());
 		if (DebugNet())
 			fprintf(stderr, "[Net] RemoteConnection: downloaded \"%s\" (%zu bytes) -> %s\n",
 				download.package.packageName.c_str(), download.data.size(), dest.string().c_str());

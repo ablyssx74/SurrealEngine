@@ -533,6 +533,24 @@ void PackageManager::ScanPaths()
 		ScanFolder(finalPath.string(), filename.string());
 	}
 
+	// Packages RemoteConnection downloaded from a server in a past session (see
+	// RegisterDownloadedPackage) live in the cache folder, saved under their real package name -
+	// not one of the Paths= entries above, so they need their own scan. Anything a real content
+	// folder already provided a file for above always wins (same "don't add it again" rule
+	// ScanFolder itself already follows), so this only fills in packages nothing else supplied.
+	if (fs::exists(gameCacheFolderPath))
+	{
+		for (const auto& dir_entry : fs::directory_iterator{ gameCacheFolderPath })
+		{
+			if (dir_entry.is_regular_file())
+			{
+				NameString fileNameString(dir_entry.path().stem().string());
+				if (packageFilenames.find(fileNameString) == packageFilenames.end())
+					packageFilenames[fileNameString] = dir_entry.path().string();
+			}
+		}
+	}
+
 	if (IsKlingonHonorGuard())
 	{
 		for (const auto& dir_entry: fs::directory_iterator{gameSystemFolderPath})
