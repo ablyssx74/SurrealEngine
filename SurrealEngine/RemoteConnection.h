@@ -111,7 +111,16 @@ public:
 	// an ICMP port-unreachable surfacing as a receive error) via SE_DEBUG_NET.
 	void Tick(float elapsed);
 
+	// A short, human-readable line describing what this connection is currently doing
+	// ("Connecting to host:port...", "Downloading X.utx: 42% (1.2/4.9 MB)", "Loading map X...") -
+	// empty once there's nothing worth telling the player about (not connected, or fully joined).
+	// Drawn on screen every frame by RenderSubsystem::PostRender(), independent of the SE_DEBUG_NET
+	// stderr logging (which stays as detailed wire-level tracing for development, not for players).
+	const std::string& GetStatusLine() const { return statusLine; }
+
 private:
+	std::string statusLine;
+
 	remote_socket_t handle = remote_invalid_socket_value;
 	std::string remoteHost;
 	int remotePort = 0;

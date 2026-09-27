@@ -155,6 +155,14 @@ namespace
 		return debugNet;
 	}
 
+	// Formats a byte count as e.g. "4.9 MB" for the on-screen download-progress status line.
+	std::string FormatMegabytes(size_t bytes)
+	{
+		char buf[32];
+		snprintf(buf, sizeof(buf), "%.1f MB", bytes / (1024.0 * 1024.0));
+		return buf;
+	}
+
 	// LSB-first bit writer/reader matching UE1's wire format, reverse-engineered this session from
 	// genuine Wireshark captures of a real UT99-for-Linux client talking to a real UT99-for-Linux
 	// server, cross-checked against a set of real 1997-1999 Epic Games UT99 engine source files
@@ -649,6 +657,7 @@ bool RemoteConnection::Connect(const std::string& host, int port)
 
 	remoteHost = host;
 	remotePort = port;
+	statusLine = "Connecting to " + host + ":" + std::to_string(port) + "...";
 
 	if (DebugNet())
 		fprintf(stderr, "[Net] RemoteConnection: socket ready, target %s:%d\n", host.c_str(), port);
@@ -674,6 +683,7 @@ void RemoteConnection::Disconnect()
 	}
 	remoteHost.clear();
 	remotePort = 0;
+	statusLine.clear();
 }
 
 // Every channel has its own ChSequence numbering, starting at 1 when it's opened (confirmed this
@@ -771,6 +781,7 @@ void RemoteConnection::StartNextDownload()
 	if (DebugNet())
 		fprintf(stderr, "[Net] RemoteConnection: requesting download of \"%s\" (GUID=%s) on channel %d -> %d\n",
 			pkg.packageName.c_str(), pkg.guidHex.c_str(), chIndex, sent);
+	statusLine = "Downloading " + pkg.packageName + ": 0% (0.0/" + FormatMegabytes(pkg.fileSize) + ")";
 
 	RemoteFileDownload download;
 	download.package = std::move(pkg);
@@ -801,6 +812,10 @@ void RemoteConnection::FinishDownload(int chIndex, bool success)
 		if (DebugNet())
 			fprintf(stderr, "[Net] RemoteConnection: downloaded \"%s\" (%zu bytes) -> %s\n",
 				download.package.packageName.c_str(), download.data.size(), dest.string().c_str());
+		// If there's another package queued, StartNextDownload() below immediately overwrites
+		// this with its own "Downloading ...: 0%" line - this is only what's left on screen once
+		// every queued package is done.
+		statusLine = "Downloaded " + download.package.packageName + ". Waiting for the server...";
 	}
 	else if (DebugNet())
 	{
@@ -985,6 +1000,12 @@ void RemoteConnection::TryLoadNetworkMap(const std::string& levelName)
 		// out-of-scope gap - see the class doc comment). Remember the level name so Tick() keeps
 		// retrying instead of getting stuck after one failed attempt, in case that ever changes.
 		pendingNetworkMapLevel = levelName;
+		// Don't clobber a "Downloading X: N%" line already on screen with this less useful one -
+		// only show it while nothing more specific is happening (e.g. once every download so far
+		// has finished but the map still can't load - a known, out-of-scope gap, see the class doc
+		// comment - or before any download has started at all).
+		if (statusLine.empty() || statusLine.rfind("Downloaded ", 0) == 0)
+			statusLine = "Waiting for required packages before loading \"" + levelName + "\"...";
 		if (DebugNet())
 			fprintf(stderr, "[Net] RemoteConnection: not every required package is available locally yet - can't load \"%s\" as a network client\n", levelName.c_str());
 		return;
@@ -995,17 +1016,20 @@ void RemoteConnection::TryLoadNetworkMap(const std::string& levelName)
 	if (url.Map.find('.') == std::string::npos)
 		url.Map += "." + engine->packages->GetMapExtension();
 
+	statusLine = "Loading map \"" + url.Map + "\"...";
 	try
 	{
 		engine->LoadMap(url, {}, /*isNetworkClient=*/true);
 		loadedNetworkMap = true;
 		pendingNetworkMapLevel.clear();
+		statusLine.clear();
 		if (DebugNet())
 			fprintf(stderr, "[Net] RemoteConnection: loaded \"%s\" as a network client\n", url.Map.c_str());
 	}
 	catch (const std::exception& e)
 	{
 		pendingNetworkMapLevel.clear(); // a real load failure (bad map, script error, ...) - retrying won't help
+		statusLine = "Failed to load \"" + url.Map + "\": " + e.what();
 		if (DebugNet())
 			fprintf(stderr, "[Net] RemoteConnection: failed to load \"%s\" as a network client: %s\n", url.Map.c_str(), e.what());
 	}
@@ -1253,8 +1277,15 @@ void RemoteConnection::Tick(float elapsed)
 					{
 						std::vector<uint8_t> chunk = ReadBunchRawBytes((const uint8_t*)buffer, received, bunch);
 						downloadIt->second.data.insert(downloadIt->second.data.end(), chunk.begin(), chunk.end());
-						if (bunch.bClose || downloadIt->second.data.size() >= downloadIt->second.package.fileSize)
-							FinishDownload(bunch.chIndex, true);
+						uint32_t fileSize = downloadIt->second.package.fileSize;
+						if (fileSize > 0)
+						{
+							int percent = (int)(100.0 * downloadIt->second.data.size() / fileSize);
+							statusLine = "Downloading " + downloadIt->second.package.packageName + ": " + std::to_string(percent) +
+								"% (" + FormatMegabytes(downloadIt->second.data.size()) + "/" + FormatMegabytes(fileSize) + ")";
+						}
+						if (bunch.bClose || downloadIt->second.data.size() >= fileSize)
+							FinishDownload(bunch.chIndex, true); // may overwrite statusLine again - see FinishDownload
 					}
 					continue;
 				}
@@ -1289,6 +1320,7 @@ void RemoteConnection::Tick(float elapsed)
 							int32_t challenge = (int32_t)strtol(text.c_str() + pos, nullptr, 10);
 							int32_t response = ChallengeResponse(challenge);
 							sentLoginReply = true;
+							statusLine = "Logging in...";
 							if (DebugNet())
 								fprintf(stderr, "[Net] RemoteConnection: parsed CHALLENGE=%d from server packet %d, computed RESPONSE=%d\n", challenge, packet.packetId, response);
 

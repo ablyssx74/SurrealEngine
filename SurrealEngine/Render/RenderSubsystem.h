@@ -94,6 +94,7 @@ private:
 	void PostRender();
 	void PostRenderFlash();
 	void DrawTimedemoStats();
+	void DrawNetConnectStatus();
 	void DrawCollisionDebug();
 	void DrawTile(TextureInfo& texinfo, const Rectf& dest, const Rectf& src, const Rectf& clipBox, float Z, vec4 color, vec4 fog, uint32_t flags);
 

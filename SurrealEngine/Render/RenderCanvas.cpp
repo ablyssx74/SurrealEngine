@@ -103,7 +103,8 @@ void RenderSubsystem::PostRender()
 		CallEvent(engine->viewport->Actor(), EventName::PostRender, { ExpressionValue::ObjectValue(engine->canvas) });
 	CallEvent(engine->console, EventName::PostRender, { ExpressionValue::ObjectValue(engine->canvas) });
 	DrawTimedemoStats();
-	
+	DrawNetConnectStatus();
+
 	if (ShowCollisionDebug)
 		DrawCollisionDebug();
 }
@@ -623,6 +624,29 @@ void RenderSubsystem::DrawTimedemoStats()
 			}
 		}
 	}
+}
+
+// Draws RemoteConnection's current status line (see RemoteConnection.h/.cpp) - "Connecting to
+// host:port...", "Downloading X.utx: 42% (1.2/4.9 MB)", "Loading map X...", etc. - top-center of
+// the screen every frame while it's non-empty, i.e. while a multiplayer join is actually in
+// progress. Uses the same plain-C++ DrawText/SmallFont path DrawTimedemoStats above already uses
+// for its FPS/stats overlay - no UnrealScript/VM call involved, so this works regardless of
+// whether a "real" level is loaded yet.
+void RenderSubsystem::DrawNetConnectStatus()
+{
+	const std::string& text = engine->remoteConnection.GetStatusLine();
+	if (text.empty())
+		return;
+
+	UFont* font = engine->canvas->SmallFont();
+	if (!font)
+		return;
+
+	float sizeX = engine->viewport->ViewportWidth() / (float)Canvas.uiscale;
+	float curX = (sizeX - GetTextSize(font, text).x) * 0.5f;
+	float curY = 16.0f;
+	float curXL = 0.0f, curYL = 0.0f;
+	DrawText(font, vec4(1.0f), 0.0f, 0.0f, curX, curY, curXL, curYL, false, text, PF_NoSmooth | PF_Masked, false);
 }
 
 void RenderSubsystem::DrawCollisionDebug()
