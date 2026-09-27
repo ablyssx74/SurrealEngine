@@ -170,7 +170,7 @@ public:
 		bool TransferItems = false;
 	} ClientTravelInfo;
 
-	// WIP: see RemoteConnection.h - not a working implementation of UT99's netcode yet.
+	// See RemoteConnection.h for what real multiplayer join support this does and doesn't cover yet.
 	RemoteConnection remoteConnection;
 
 	struct
