@@ -55,6 +55,28 @@ public:
 	// GUID= a server's USES message announced for this package.
 	const uint8_t* GetGuid() const { return Guid; }
 
+	// This package's export count as of a given point in its own save history (the package header's
+	// "generations" list, one entry per time the package was ever saved, each recording that save's
+	// ExportCount/NameCount - a real, distinct concept from Version). A server's USES GEN= value is
+	// exactly this: which of ITS package's generations the wire's flat object-index space was built
+	// against. If a locally-installed copy of the same package has since grown its export table
+	// (e.g. a newer content patch added objects), computing this connection's object indices against
+	// our full, current export count would disagree with the server's index space for every later
+	// package too - the client needs to size this package down to what the server's generation
+	// actually had. Mirrors UPackageMap::Compute()'s clipping, Core/Src/UnCoreNet.cpp:252-260:
+	// remoteGeneration is 1-based (as it appears on the wire); 0 or anything at or past this
+	// package's own generation count means "use the full, current export table" - either the server
+	// didn't send GEN= at all, or its copy is the same generation as ours (or newer, which this
+	// engine has no way to size up to and falls back to its own full count for, same as real UT99).
+	int GetExportCountForGeneration(int remoteGeneration) const
+	{
+		int localGeneration = (int)Generations.size();
+		int actualRemoteGeneration = (remoteGeneration <= 0) ? localGeneration : remoteGeneration;
+		if (actualRemoteGeneration > 0 && actualRemoteGeneration < localGeneration)
+			return (int)Generations[actualRemoteGeneration - 1].ExportCount;
+		return GetExportCount();
+	}
+
 	template<class T> Array<T*> GetAllObjects();
 
 private:
@@ -77,6 +99,13 @@ private:
 	Array<ExportTableEntry> ExportTable;
 	Array<ImportTableEntry> ImportTable;
 	uint8_t Guid[16] = {};
+
+	struct PackageGeneration
+	{
+		uint32_t ExportCount = 0;
+		uint32_t NameCount = 0;
+	};
+	Array<PackageGeneration> Generations;
 
 	std::map<NameString, int> NameHash;
 

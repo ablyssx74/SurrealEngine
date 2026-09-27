@@ -354,10 +354,13 @@ void Package::ReadTables()
 	{
 		stream->ReadBytes(Guid, 16);
 		uint32_t generationCount = stream->ReadInt32();
+		Generations.reserve(generationCount);
 		for (uint32_t i = 0; i < generationCount; i++)
 		{
-			uint32_t genExportCount = stream->ReadInt32();
-			uint32_t genNameCount = stream->ReadInt32();
+			PackageGeneration generation;
+			generation.ExportCount = stream->ReadInt32();
+			generation.NameCount = stream->ReadInt32();
+			Generations.push_back(generation);
 		}
 	}
 

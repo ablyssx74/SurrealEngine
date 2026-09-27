@@ -868,7 +868,8 @@ bool RemoteConnection::ResolvePackageMap()
 				return false;
 		}
 		entry.objectBase = base;
-		base += entry.package->GetExportCount();
+		entry.objectCount = entry.package->GetExportCountForGeneration((int)entry.remoteGeneration);
+		base += entry.objectCount;
 	}
 	return true;
 }
@@ -877,7 +878,7 @@ int RemoteConnection::PackageMapMaxObjectIndex() const
 {
 	if (packageMapList.empty() || !packageMapList.back().package)
 		return 0;
-	return packageMapList.back().objectBase + packageMapList.back().package->GetExportCount();
+	return packageMapList.back().objectBase + packageMapList.back().objectCount;
 }
 
 // Reimplements UPackageMap::IndexToObject (UnCoreNet.cpp): walk the package list in order,
@@ -893,10 +894,9 @@ UObject* RemoteConnection::PackageMapIndexToObject(int flatIndex) const
 	{
 		if (!entry.package)
 			return nullptr;
-		int count = entry.package->GetExportCount();
-		if (flatIndex < count)
+		if (flatIndex < entry.objectCount)
 			return entry.package->GetUObject(flatIndex + 1); // Package::GetUObject uses a 1-based export convention
-		flatIndex -= count;
+		flatIndex -= entry.objectCount;
 	}
 	return nullptr;
 }

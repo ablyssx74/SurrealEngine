@@ -54,9 +54,10 @@ struct RemotePackageMapEntry
 {
 	std::string guidHex;
 	std::string packageName;
-	uint32_t remoteGeneration = 0; // the "GEN=" value - this server's package generation, for reference
+	uint32_t remoteGeneration = 0; // the "GEN=" value - which of the server's own package generations the wire's object indices were built against
 	Package* package = nullptr; // resolved by ResolvePackageMap() once loadable locally
 	int objectBase = 0; // this package's first flat object index, set by ResolvePackageMap()
+	int objectCount = 0; // this package's export count as of remoteGeneration (see Package::GetExportCountForGeneration), set by ResolvePackageMap()
 };
 
 // WIP scaffolding for real multiplayer client-join support (SurrealEngine currently has no
