@@ -4,6 +4,8 @@
 #include "GLRenderDevice.h"
 #include "GLCachedTexture.h"
 #include <cstdlib>
+#include <cctype>
+#include <string>
 
 GLUploadManager::GLUploadManager(GLRenderDevice* renderer) : renderer(renderer)
 {
@@ -23,15 +25,38 @@ GLUploadManager::~GLUploadManager()
 // forcing LOD 0 never escaped this). Forcing every texture down to a single mip level sidesteps
 // it entirely and restores full texture detail; the only cost is losing mipmap-based
 // minification filtering (more shimmer/aliasing on distant/oblique surfaces), a clear win over
-// textures not rendering at all. Set SE_DISABLE_MIPMAP_WORKAROUND=1 to re-enable real mipmapping
-// on Haiku, e.g. to re-test whether a future Mesa update fixed the underlying completeness bug.
+// textures not rendering at all. Set SE_DISABLE_MIPMAP_WORKAROUND=1 to re-enable real mipmapping,
+// e.g. to re-test whether a future Mesa update fixed the underlying completeness bug.
+//
+// Confirmed via a Linux user report (SE_DEBUG_NO_MIPMAPS fixed an identical black-world-texture
+// symptom there) that this was never actually Haiku-specific - it was only ever found there
+// first. The original diagnosis above already named the two renderer families that reproduce
+// it: Zink (GL-over-Vulkan translation, used on Haiku but also common on Linux, e.g. as a
+// fallback or via NVK) and llvmpipe (Mesa's software rasterizer, likewise not OS-specific). So
+// detect those by GL_RENDERER at runtime instead of gating on the OS.
 static bool ShouldForceSingleMipLevel()
 {
-#ifdef __HAIKU__
 	static const bool disableWorkaround = std::getenv("SE_DISABLE_MIPMAP_WORKAROUND") != nullptr;
 	if (!disableWorkaround)
+	{
+#ifdef __HAIKU__
 		return true;
+#else
+		static const bool affectedRenderer = []()
+			{
+				const char* renderer = (const char*)glGetString(GL_RENDERER);
+				if (!renderer)
+					return false;
+				std::string s = renderer;
+				for (char& c : s)
+					c = (char)std::tolower((unsigned char)c);
+				return s.find("zink") != std::string::npos || s.find("llvmpipe") != std::string::npos;
+			}();
+		if (affectedRenderer)
+			return true;
 #endif
+	}
+
 	// Diagnostic escape hatch: set SE_DEBUG_NO_MIPMAPS=1 to force every texture to a single
 	// mip level, no matter how many levels its source data has, on any platform.
 	static const bool debugNoMipmaps = std::getenv("SE_DEBUG_NO_MIPMAPS") != nullptr;
