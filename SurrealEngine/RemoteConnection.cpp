@@ -866,6 +866,25 @@ bool RemoteConnection::ResolvePackageMap()
 			entry.package = engine->packages->GetPackage(entry.packageName);
 			if (!entry.package)
 				return false;
+
+			// Diagnostic: this engine only ever matched a USES package to a local file by name -
+			// never by the GUID the server actually announced for it. A same-named but genuinely
+			// different file (e.g. this connection's local install predates or postdates whatever
+			// patch level the server runs) has its own, unrelated export table: no amount of
+			// generation-clipping arithmetic can align two files that didn't share that history,
+			// since "generation N" only means the same thing for files descended from the same
+			// lineage. Warn loudly here so a GUID mismatch isn't mistaken for an indexing bug.
+			if (DebugNet())
+			{
+				const uint8_t* localGuid = entry.package->GetGuid();
+				char localGuidHex[33];
+				for (int i = 0; i < 16; i++)
+					snprintf(localGuidHex + i * 2, 3, "%02X", localGuid[i]);
+				if (entry.guidHex != localGuidHex)
+					fprintf(stderr, "[Net] RemoteConnection: WARNING - local \"%s\" has GUID %s but the server announced GUID %s for it - "
+						"this is NOT the same file the server is using, so its object indices cannot possibly line up\n",
+						entry.packageName.c_str(), localGuidHex, entry.guidHex.c_str());
+			}
 		}
 		entry.objectBase = base;
 		entry.objectCount = entry.package->GetExportCountForGeneration((int)entry.remoteGeneration);
