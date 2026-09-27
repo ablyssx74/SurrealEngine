@@ -980,6 +980,11 @@ void RemoteConnection::TryLoadNetworkMap(const std::string& levelName)
 
 	if (!ResolvePackageMap())
 	{
+		// Not fatal - e.g. a package that's still mid-download (see FinishDownload) or, right now,
+		// one PackageManager can't yet resolve out of the download cache at all (a known, explicitly
+		// out-of-scope gap - see the class doc comment). Remember the level name so Tick() keeps
+		// retrying instead of getting stuck after one failed attempt, in case that ever changes.
+		pendingNetworkMapLevel = levelName;
 		if (DebugNet())
 			fprintf(stderr, "[Net] RemoteConnection: not every required package is available locally yet - can't load \"%s\" as a network client\n", levelName.c_str());
 		return;
@@ -994,11 +999,13 @@ void RemoteConnection::TryLoadNetworkMap(const std::string& levelName)
 	{
 		engine->LoadMap(url, {}, /*isNetworkClient=*/true);
 		loadedNetworkMap = true;
+		pendingNetworkMapLevel.clear();
 		if (DebugNet())
 			fprintf(stderr, "[Net] RemoteConnection: loaded \"%s\" as a network client\n", url.Map.c_str());
 	}
 	catch (const std::exception& e)
 	{
+		pendingNetworkMapLevel.clear(); // a real load failure (bad map, script error, ...) - retrying won't help
 		if (DebugNet())
 			fprintf(stderr, "[Net] RemoteConnection: failed to load \"%s\" as a network client: %s\n", url.Map.c_str(), e.what());
 	}
@@ -1030,6 +1037,17 @@ void RemoteConnection::PossessIfOwnPawn(UActor* actor)
 // ClassNetCache.h) or RPC calls, back to back, until the bunch's content bits run out.
 void RemoteConnection::HandleActorBunch(const uint8_t* packetData, int packetSize, int chIndex, bool bOpen, bool bClose, int contentBitOffset, int contentBits)
 {
+	// Without a loaded network map there's no valid PackageMap (ResolvePackageMap only ever
+	// partially resolves packageMapList when it fails - see TryLoadNetworkMap) and no level for
+	// these actors to attach to anyway. Bailing out here matters, not just as a nicety: with an
+	// unresolved PackageMap, PackageMapMaxObjectIndex() falls back to 0, which makes
+	// DecodeObjectRef's ReadInt(0) consume zero bits and always resolve to flat index 0 - silently
+	// wrong output (always the same bogus actor) plus a desynced bit position for the rest of the
+	// bunch, rather than a clean failure. Confirmed against a real server: every actor channel
+	// misresolved to the same actor until this guard was added.
+	if (!loadedNetworkMap)
+		return;
+
 	int byteOff = contentBitOffset / 8;
 	int subBit = contentBitOffset % 8;
 	if (byteOff >= packetSize)
@@ -1177,6 +1195,9 @@ void RemoteConnection::Tick(float elapsed)
 {
 	if (handle == remote_invalid_socket_value)
 		return;
+
+	if (!loadedNetworkMap && !pendingNetworkMapLevel.empty())
+		TryLoadNetworkMap(pendingNetworkMapLevel); // retry - see the comment where this was set
 
 	for (;;)
 	{
