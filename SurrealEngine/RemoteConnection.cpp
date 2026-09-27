@@ -921,10 +921,42 @@ UObject* RemoteConnection::DecodeObjectRef(BitReader& br)
 	else
 	{
 		// Static object reference: a flat index into the connection's known packages.
-		uint32_t index = br.ReadInt((uint32_t)PackageMapMaxObjectIndex());
+		uint32_t maxIndex = (uint32_t)PackageMapMaxObjectIndex();
+		uint32_t index = br.ReadInt(maxIndex);
 		if (br.IsError())
 			return nullptr;
-		return PackageMapIndexToObject((int)index);
+		UObject* obj = PackageMapIndexToObject((int)index);
+
+		if (DebugNet())
+		{
+			// Diagnostic: which package/local-offset this flat index actually landed in, and what
+			// it resolved to - narrows down whether a resolution failure is this connection's
+			// object-index math disagreeing with the server's (index lands in a plausible package
+			// but at the wrong local offset, or beyond MaxObjectIndex entirely) versus something
+			// else (e.g. bit-alignment drifting upstream of this read).
+			int remaining = (int)index;
+			std::string where = "out of range";
+			for (const RemotePackageMapEntry& entry : packageMapList)
+			{
+				if (!entry.package)
+				{
+					where = "package \"" + entry.packageName + "\" not resolved";
+					break;
+				}
+				if (remaining < entry.objectCount)
+				{
+					where = "package \"" + entry.packageName + "\" local index " + std::to_string(remaining) +
+						"/" + std::to_string(entry.objectCount) + " (GEN=" + std::to_string(entry.remoteGeneration) + ")";
+					break;
+				}
+				remaining -= entry.objectCount;
+			}
+			fprintf(stderr, "[Net] RemoteConnection: static object ref index=%u/%u -> %s -> %s\n",
+				index, maxIndex, where.c_str(),
+				obj ? (obj->Class ? (obj->Class->Name.ToString() + "'" + obj->Name.ToString() + "'").c_str() : "(no class)") : "(null)");
+		}
+
+		return obj;
 	}
 }
 
