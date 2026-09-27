@@ -458,6 +458,13 @@ public:
 	static const int TouchingArraySize = 4;
 	bool TouchEventSent[TouchingArraySize] = {};
 
+	// UT469 changed the Touching property from a fixed 4-element array to a real dynamic array
+	// (see Touching_UT469() below) - removing the original engine's simultaneous-touch limit. The
+	// TouchEventSent bookkeeping above is native, C++-only state (not a real UnrealScript
+	// property) and was never resized to match, so it stays parallel to Touching_UT469() instead,
+	// growing in lockstep with it (see UActor::Touch/UnTouch's UT469 branch).
+	Array<bool> TouchEventSentUT469;
+
 	bool HasAnim(const NameString& sequence);
 	bool IsAnimating();
 	bool IsAnimating_HP(std::optional<NameString> RootBone);
