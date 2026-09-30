@@ -1015,8 +1015,31 @@ bool RemoteConnection::DecodePropertyValue(BitReader& br, UProperty* prop, void*
 		return true;
 	}
 	case ExpressionValueType::ValueObject:
-		*(UObject**)elementPtr = DecodeObjectRef(br);
+	{
+		UObject* obj = DecodeObjectRef(br);
+
+		// Only store an object the property can actually hold. Anything else (e.g. a texture in an
+		// Actor-typed Owner) would later be treated as an actor by script/engine code and read
+		// garbage - that crashed ULevel::TickActor recursing through Owner().
+		UObjectProperty* objProp = UObject::TryCast<UObjectProperty>(prop);
+		if (obj && objProp && objProp->ObjectClass)
+		{
+			bool assignable = false;
+			for (UStruct* s = obj->Class; s && !assignable; s = s->BaseStruct)
+				assignable = (s == objProp->ObjectClass);
+			if (!assignable)
+			{
+				if (DebugNet())
+					fprintf(stderr, "[Net] RemoteConnection: rejected %s '%s' for property \"%s\" (needs %s)\n",
+						obj->Class ? obj->Class->Name.ToString().c_str() : "?", obj->Name.ToString().c_str(),
+						prop->Name.ToString().c_str(), objProp->ObjectClass->Name.ToString().c_str());
+				obj = nullptr;
+			}
+		}
+
+		*(UObject**)elementPtr = obj;
 		return true;
+	}
 	case ExpressionValueType::ValueString:
 		// UStrProperty::NetSerializeItem is a plain FString: compact length, then that many bytes
 		// including the null terminator (BitReader::ReadString already strips it).
