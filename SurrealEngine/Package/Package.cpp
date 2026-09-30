@@ -340,6 +340,7 @@ void Package::ReadTables()
 	uint32_t nameOffset = stream->ReadInt32();
 
 	uint32_t exportCount = stream->ReadInt32();
+	FileExportCount = exportCount;
 	uint32_t exportOffset = stream->ReadInt32();
 
 	uint32_t importCount = stream->ReadInt32();

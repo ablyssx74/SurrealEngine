@@ -144,12 +144,19 @@ void Engine::Run()
 	if (!LaunchInfo.noEntryMap)
 		LoadEntryMap();
 
-	if (LaunchInfo.url.empty())
+	// A launch URL like "unreal://host:port" names a server, not a local map. Load the default
+	// map as usual and queue the join through ClientTravel so the main loop's Host branch handles it.
+	bool joinOnLaunch = !LaunchInfo.url.empty() && !UnrealURL(LaunchInfo.url).Host.empty();
+
+	if (LaunchInfo.url.empty() || joinOnLaunch)
 		LoadMap(GetDefaultURL(packages->GetIniValue("system", "URL", "LocalMap")));
 	else
 		LoadMap(UnrealURL(GetDefaultURL(packages->GetIniValue("system", "URL", "LocalMap")), LaunchInfo.url));
 
 	LoginPlayer();
+
+	if (joinOnLaunch)
+		ClientTravel(LaunchInfo.url, ETravelType::TRAVEL_Absolute, false);
 
 	auto objprop = GC::Alloc<UObjectProperty>(NameString(), nullptr, ObjectFlags::NoFlags);
 	auto vecprop = GC::Alloc<UStructProperty>(NameString(), nullptr, ObjectFlags::NoFlags);

@@ -888,6 +888,9 @@ bool RemoteConnection::ResolvePackageMap()
 		}
 		entry.objectBase = base;
 		entry.objectCount = entry.package->GetExportCountForGeneration((int)entry.remoteGeneration);
+		if (DebugNet())
+			fprintf(stderr, "[Net] RemoteConnection: package map: %-16s remoteGen=%d fullExports=%d -> base=%d count=%d\n",
+				entry.packageName.c_str(), (int)entry.remoteGeneration, entry.package->GetExportCount(), base, entry.objectCount);
 		base += entry.objectCount;
 	}
 	return true;
@@ -932,6 +935,8 @@ UObject* RemoteConnection::DecodeObjectRef(BitReader& br)
 		// Dynamic actor reference (or None): a channel index on this connection, not a package
 		// object index - real UT99 resolves this to whichever actor currently owns that channel.
 		uint32_t chIndex = br.ReadInt(MAX_CHANNELS_LOCAL);
+		lastRefWasDynamic = true;
+		lastDynamicRefChannel = (int)chIndex;
 		if (br.IsError() || chIndex == 0)
 			return nullptr;
 		auto it = activeActorChannels.find((int)chIndex);
@@ -940,11 +945,13 @@ UObject* RemoteConnection::DecodeObjectRef(BitReader& br)
 	else
 	{
 		// Static object reference: a flat index into the connection's known packages.
+		lastRefWasDynamic = false;
 		uint32_t maxIndex = (uint32_t)PackageMapMaxObjectIndex();
 		uint32_t index = br.ReadInt(maxIndex);
 		if (br.IsError())
 			return nullptr;
 		UObject* obj = PackageMapIndexToObject((int)index);
+		lastStaticRefIndex = (int)index;
 
 		if (DebugNet())
 		{
@@ -1010,6 +1017,11 @@ bool RemoteConnection::DecodePropertyValue(BitReader& br, UProperty* prop, void*
 	case ExpressionValueType::ValueObject:
 		*(UObject**)elementPtr = DecodeObjectRef(br);
 		return true;
+	case ExpressionValueType::ValueString:
+		// UStrProperty::NetSerializeItem is a plain FString: compact length, then that many bytes
+		// including the null terminator (BitReader::ReadString already strips it).
+		*(std::string*)elementPtr = br.ReadString();
+		return !br.IsError();
 	case ExpressionValueType::ValueVector:
 	{
 		// Compressed varying-width vector (UStructProperty::NetSerializeItem's "Vector" case):
@@ -1162,9 +1174,23 @@ void RemoteConnection::HandleActorBunch(const uint8_t* packetData, int packetSiz
 		if (!bOpen)
 			return; // a channel we haven't seen before must be introduced by its bOpen bunch
 
+		std::string leadBits;
+		if (DebugNet())
+		{
+			BitReader peek(packetData + byteOff, packetSize - byteOff, subBit + contentBits);
+			if (subBit)
+				peek.ReadBits(subBit);
+			for (int i = 0; i < 48 && peek.RemainingBits() > 0; i++)
+				leadBits += peek.ReadBit() ? '1' : '0';
+		}
+
 		UObject* obj = DecodeObjectRef(br);
 		if (br.IsError())
 			return;
+
+		if (DebugNet())
+			fprintf(stderr, "[Net] RemoteConnection: bOpen ch=%d bits=%d lead=%s -> %s\n", chIndex, contentBits, leadBits.c_str(),
+				obj ? ((obj->Class ? obj->Class->Name.ToString() : std::string("?")) + "'" + obj->Name.ToString() + "'").c_str() : "(null)");
 
 		actor = UObject::TryCast<UActor>(obj);
 		if (!actor)
@@ -1173,7 +1199,9 @@ void RemoteConnection::HandleActorBunch(const uint8_t* packetData, int packetSiz
 			if (!spawnClass)
 			{
 				if (DebugNet())
-					fprintf(stderr, "[Net] RemoteConnection: actor channel %d bOpen resolved to neither an actor nor a class - ignoring\n", chIndex);
+					fprintf(stderr, "[Net] RemoteConnection: actor channel %d bOpen resolved to neither an actor nor a class - ignoring (%s, bClose=%d, contentBits=%d)\n", chIndex,
+						lastRefWasDynamic ? ("dynamic ref to channel " + std::to_string(lastDynamicRefChannel) + (obj ? "" : ", no actor open there")).c_str() : ("static ref, flat index " + std::to_string(lastStaticRefIndex)).c_str(),
+						(int)bClose, contentBits);
 				return;
 			}
 
@@ -1257,7 +1285,9 @@ void RemoteConnection::HandleActorBunch(const uint8_t* packetData, int packetSiz
 				if (present)
 				{
 					uint8_t scratch[16] = {};
-					if (!DecodePropertyValue(br, param, scratch))
+					std::string scratchString; // a string parameter needs a live std::string to decode into, not raw zeroed bytes
+					void* scratchTarget = (param->ValueType == ExpressionValueType::ValueString) ? static_cast<void*>(&scratchString) : static_cast<void*>(scratch);
+					if (!DecodePropertyValue(br, param, scratchTarget))
 					{
 						paramError = true;
 						break;

@@ -131,6 +131,9 @@ private:
 	bool loadedNetworkMap = false; // true once WELCOME's LEVEL= has triggered a client-mode LoadMap
 	std::string pendingNetworkMapLevel; // set by TryLoadNetworkMap while it keeps failing, so Tick() can retry (e.g. once missing packages actually finish becoming loadable)
 	float networkMapRetryCooldown = 0.0f; // seconds until Tick() retries TryLoadNetworkMap again - without this it re-tries (and re-logs the same failure) every single frame while a package download is still in flight, which can take a while
+	bool lastRefWasDynamic = false; // whether the most recent DecodeObjectRef read a dynamic (channel) ref or a static (package) one - bOpen failure diagnostic only
+	int lastDynamicRefChannel = -1;
+	int lastStaticRefIndex = -1; // flat package-map index of the most recent static ref DecodeObjectRef read, kept only for the bOpen failure diagnostic in HandleActorBunch
 	bool possessedOwnPawn = false; // true once a locally-owned PlayerPawn has been possessed (see step 8's heuristic in the plan)
 	int nextOutgoingPacketId = 2; // 0 was HELLO, 1 was NETSPEED+LOGIN
 	int nextChannelIndex = 1; // 0 is the control channel; AllocateFileChannelIndex() searches upward from here

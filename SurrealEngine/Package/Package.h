@@ -68,13 +68,19 @@ public:
 	// package's own generation count means "use the full, current export table" - either the server
 	// didn't send GEN= at all, or its copy is the same generation as ours (or newer, which this
 	// engine has no way to size up to and falls back to its own full count for, same as real UT99).
+	//
+	// Two details matter for agreeing with a real server's index space: the generation table's own
+	// count is used whenever the server's generation exists locally (including the current one),
+	// exactly as UPackageMap::Compute does - and the fallback is the export count stored in the file,
+	// never GetExportCount(), because ReadTables() appends stub exports for native classes (e.g. +43
+	// for Engine, +25 for Core) that the server's copy of the package doesn't have.
 	int GetExportCountForGeneration(int remoteGeneration) const
 	{
 		int localGeneration = (int)Generations.size();
 		int actualRemoteGeneration = (remoteGeneration <= 0) ? localGeneration : remoteGeneration;
-		if (actualRemoteGeneration > 0 && actualRemoteGeneration < localGeneration)
+		if (actualRemoteGeneration > 0 && actualRemoteGeneration <= localGeneration)
 			return (int)Generations[actualRemoteGeneration - 1].ExportCount;
-		return GetExportCount();
+		return (int)FileExportCount;
 	}
 
 	template<class T> Array<T*> GetAllObjects();
@@ -92,6 +98,7 @@ private:
 	std::string FileName;
 	std::string FileExtension;
 
+	uint32_t FileExportCount = 0; // export count as stored in the file header, before ReadTables() appends native class stubs
 	int Version = 0;
 	int LicenseeMode = 0;
 	PackageFlags Flags = PackageFlags::NoFlags;
