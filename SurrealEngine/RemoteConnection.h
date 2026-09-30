@@ -57,6 +57,8 @@ struct RemotePackageMapEntry
 	uint32_t remoteGeneration = 0; // the "GEN=" value - which of the server's own package generations the wire's object indices were built against
 	Package* package = nullptr; // resolved by ResolvePackageMap() once loadable locally
 	int objectBase = 0; // this package's first flat object index, set by ResolvePackageMap()
+	int nameBase = 0; // this package's first flat name index (the name-table twin of objectBase), set by ResolvePackageMap()
+	int nameCount = 0; // this package's name count as of remoteGeneration
 	int objectCount = 0; // this package's export count as of remoteGeneration (see Package::GetExportCountForGeneration), set by ResolvePackageMap()
 };
 
@@ -131,6 +133,7 @@ private:
 	bool loadedNetworkMap = false; // true once WELCOME's LEVEL= has triggered a client-mode LoadMap
 	std::string pendingNetworkMapLevel; // set by TryLoadNetworkMap while it keeps failing, so Tick() can retry (e.g. once missing packages actually finish becoming loadable)
 	float networkMapRetryCooldown = 0.0f; // seconds until Tick() retries TryLoadNetworkMap again - without this it re-tries (and re-logs the same failure) every single frame while a package download is still in flight, which can take a while
+	std::string decodeTrail; // SE_DEBUG_NET only: the properties decoded so far in the current actor bunch, for diagnosing drift
 	bool lastRefWasDynamic = false; // whether the most recent DecodeObjectRef read a dynamic (channel) ref or a static (package) one - bOpen failure diagnostic only
 	int lastDynamicRefChannel = -1;
 	int lastStaticRefIndex = -1; // flat package-map index of the most recent static ref DecodeObjectRef read, kept only for the bOpen failure diagnostic in HandleActorBunch
@@ -166,6 +169,8 @@ private:
 	bool ResolvePackageMap();
 	int PackageMapMaxObjectIndex() const;
 	UObject* PackageMapIndexToObject(int flatIndex) const;
+	int PackageMapMaxNameIndex() const;
+	bool PackageMapIndexToName(int flatIndex, std::string& outName) const;
 
 	void TryLoadNetworkMap(const std::string& levelName);
 	// packetData/packetSize is the full received packet a bunch's content offset is relative to

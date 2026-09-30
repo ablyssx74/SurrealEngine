@@ -857,6 +857,7 @@ bool RemoteConnection::ResolvePackageMap()
 		return false;
 
 	int base = 0;
+	int nameBase = 0;
 	for (RemotePackageMapEntry& entry : packageMapList)
 	{
 		if (!entry.package)
@@ -886,6 +887,9 @@ bool RemoteConnection::ResolvePackageMap()
 						entry.packageName.c_str(), localGuidHex, entry.guidHex.c_str());
 			}
 		}
+		entry.nameBase = nameBase;
+		entry.nameCount = entry.package->GetNameCountForGeneration((int)entry.remoteGeneration);
+		nameBase += entry.nameCount;
 		entry.objectBase = base;
 		entry.objectCount = entry.package->GetExportCountForGeneration((int)entry.remoteGeneration);
 		if (DebugNet())
@@ -901,6 +905,34 @@ int RemoteConnection::PackageMapMaxObjectIndex() const
 	if (packageMapList.empty() || !packageMapList.back().package)
 		return 0;
 	return packageMapList.back().objectBase + packageMapList.back().objectCount;
+}
+
+int RemoteConnection::PackageMapMaxNameIndex() const
+{
+	if (packageMapList.empty() || !packageMapList.back().package)
+		return 0;
+	return packageMapList.back().nameBase + packageMapList.back().nameCount;
+}
+
+// The name-table twin of PackageMapIndexToObject: a flat name index is a running sum of each
+// package's name count, resolved through that package's own name table.
+bool RemoteConnection::PackageMapIndexToName(int flatIndex, std::string& outName) const
+{
+	if (flatIndex < 0)
+		return false;
+
+	for (const RemotePackageMapEntry& entry : packageMapList)
+	{
+		if (!entry.package)
+			return false;
+		if (flatIndex < entry.nameCount)
+		{
+			outName = entry.package->GetName(flatIndex).ToString();
+			return true;
+		}
+		flatIndex -= entry.nameCount;
+	}
+	return false;
 }
 
 // Reimplements UPackageMap::IndexToObject (UnCoreNet.cpp): walk the package list in order,
@@ -1030,9 +1062,9 @@ bool RemoteConnection::DecodePropertyValue(BitReader& br, UProperty* prop, void*
 			if (!assignable)
 			{
 				if (DebugNet())
-					fprintf(stderr, "[Net] RemoteConnection: rejected %s '%s' for property \"%s\" (needs %s)\n",
+					fprintf(stderr, "[Net] RemoteConnection: rejected %s '%s' for property \"%s\" (needs %s) | trail: %s\n",
 						obj->Class ? obj->Class->Name.ToString().c_str() : "?", obj->Name.ToString().c_str(),
-						prop->Name.ToString().c_str(), objProp->ObjectClass->Name.ToString().c_str());
+						prop->Name.ToString().c_str(), objProp->ObjectClass->Name.ToString().c_str(), decodeTrail.c_str());
 				obj = nullptr;
 			}
 		}
@@ -1045,6 +1077,31 @@ bool RemoteConnection::DecodePropertyValue(BitReader& br, UProperty* prop, void*
 		// including the null terminator (BitReader::ReadString already strips it).
 		*(std::string*)elementPtr = br.ReadString();
 		return !br.IsError();
+	case ExpressionValueType::ValueName:
+	{
+		// UNameProperty::NetSerializeItem -> UPackageMap::SerializeName: one bit selects a hardcoded
+		// engine name versus a package name (a flat index into the package list's name tables).
+		// Hardcoded names need the engine's built-in name enum, which isn't reproduced here, so those
+		// stop the bunch like any other unsupported type. NOTE: the package-name path is verified
+		// against live server traffic only (see the SE_DEBUG_NET log lines).
+		bool hardcoded = br.ReadBit() != 0;
+		if (br.IsError())
+			return false;
+		if (hardcoded)
+		{
+			if (DebugNet())
+				fprintf(stderr, "[Net] RemoteConnection: Name \"%s\" is a hardcoded engine name (not supported)\n", prop->Name.ToString().c_str());
+			return false;
+		}
+		uint32_t nameIndex = br.ReadInt((uint32_t)PackageMapMaxNameIndex());
+		std::string decoded;
+		if (br.IsError() || !PackageMapIndexToName((int)nameIndex, decoded))
+			return false;
+		if (DebugNet())
+			fprintf(stderr, "[Net] RemoteConnection: Name \"%s\" = \"%s\" (flat name index %u/%d)\n", prop->Name.ToString().c_str(), decoded.c_str(), nameIndex, PackageMapMaxNameIndex());
+		*(NameString*)elementPtr = NameString(decoded);
+		return true;
+	}
 	case ExpressionValueType::ValueVector:
 	{
 		// Compressed varying-width vector (UStructProperty::NetSerializeItem's "Vector" case):
@@ -1076,6 +1133,21 @@ bool RemoteConnection::DecodePropertyValue(BitReader& br, UProperty* prop, void*
 			for (int i = 0; i < 4; i++)
 				p[i] = (float)(int16_t)br.ReadBits(16);
 			return true;
+		}
+		if (structProp && structProp->Struct)
+		{
+			// A struct made only of byte members (Color, and the like) goes over the wire as each
+			// member's NetSerializeItem in order - one byte apiece, which is also exactly the struct's
+			// raw memory, so both ways of describing it agree. Other generic structs aren't handled.
+			bool allBytes = !structProp->Struct->Properties.empty();
+			for (UProperty* member : structProp->Struct->Properties)
+				allBytes = allBytes && member->ArrayDimension == 1 && UObject::TryCast<UByteProperty>(member) && !UObject::TryCast<UByteProperty>(member)->EnumType;
+			if (allBytes)
+			{
+				for (UProperty* member : structProp->Struct->Properties)
+					*(static_cast<uint8_t*>(elementPtr) + member->DataOffset.DataOffset) = (uint8_t)br.ReadBits(8);
+				return !br.IsError();
+			}
 		}
 		// Name/array/map and any other struct type aren't handled yet (see the class doc comment's
 		// Deferred items) - the caller must stop decoding the rest of this bunch.
@@ -1265,6 +1337,7 @@ void RemoteConnection::HandleActorBunch(const uint8_t* packetData, int packetSiz
 	if (!classCache)
 		return;
 
+	decodeTrail = actor->Class->Name.ToString() + ":";
 	uint32_t repIndex = br.ReadInt((uint32_t)classCache->GetMaxIndex());
 	UField* field = br.IsError() ? nullptr : classCache->GetFromIndex((int)repIndex);
 	while (field)
@@ -1275,6 +1348,8 @@ void RemoteConnection::HandleActorBunch(const uint8_t* packetData, int packetSiz
 			int element = 0;
 			if (prop->ArrayDimension != 1)
 				element = (int)br.ReadBits(8);
+			if (DebugNet())
+				decodeTrail += " " + prop->Name.ToString() + "(" + prop->Class->Name.ToString() + ",rep" + std::to_string(repIndex) + ")@" + std::to_string(br.GetBitPos());
 
 			void* elementPtr = prop->GetElement(actor->GetProperty(prop), element);
 			if (!DecodePropertyValue(br, prop, elementPtr))
