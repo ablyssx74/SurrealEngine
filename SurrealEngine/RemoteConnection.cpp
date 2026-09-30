@@ -1535,6 +1535,39 @@ bool RemoteConnection::TrySendRPC(UObject* instance, UFunction* function, const 
 		}
 	}
 
+	if (DebugNet() && functionName.compare(0, 10, "ServerMove") == 0)
+	{
+		// While a fire button is down, show every argument of the move with its type, to see where the fire flags travel.
+		UPlayerPawn* movingPawn = UObject::TryCast<UPlayerPawn>(actor);
+		static int fireMoveLogs = 0;
+		if (movingPawn && (movingPawn->bFire() || movingPawn->bAltFire()) && fireMoveLogs < 60)
+		{
+			fireMoveLogs++;
+			std::string all;
+			size_t i = 0;
+			for (UProperty* param : function->Properties)
+			{
+				if (!AnyFlags(param->PropFlags, PropertyFlags::Parm) || AnyFlags(param->PropFlags, PropertyFlags::ReturnParm))
+					continue;
+				all += " " + param->Name.ToString() + "=";
+				if (i < args.size())
+				{
+					switch (args[i].GetType())
+					{
+					case ExpressionValueType::ValueBool: all += args[i].ToBool() ? "T" : "F"; break;
+					case ExpressionValueType::ValueByte: all += std::to_string((int)args[i].ToByte()); break;
+					case ExpressionValueType::ValueInt: all += std::to_string(args[i].ToInt()); break;
+					case ExpressionValueType::ValueFloat: all += std::to_string(args[i].ToFloat()); break;
+					case ExpressionValueType::Nothing: all += "-"; break;
+					default: all += "?"; break;
+					}
+				}
+				i++;
+			}
+			fprintf(stderr, "[Net] FIREMOVE bFire=%d bAltFire=%d |%s\n", (int)movingPawn->bFire(), (int)movingPawn->bAltFire(), all.c_str());
+		}
+	}
+
 	const int chIndex = channelIt->second;
 	const bool reliable = AnyFlags(function->FuncFlags, FunctionFlags::NetReliable);
 	const int chSequence = reliable ? AllocateChSequence(chIndex) : 0;
@@ -1765,6 +1798,8 @@ void RemoteConnection::HandleActorBunch(const uint8_t* packetData, int packetSiz
 				decodeTrail += " " + prop->Name.ToString() + "(" + prop->Class->Name.ToString() + ",rep" + std::to_string(repIndex) + ")@" + std::to_string(br.GetBitPos());
 
 			void* elementPtr = prop->GetElement(actor->GetProperty(prop), element);
+			if (DebugNet() && prop->Name == "PlayerViewOffset")
+				fprintf(stderr, "[Net] PVO update incoming for %s %s on channel %d\n", actor->Class->Name.ToString().c_str(), actor->Name.ToString().c_str(), chIndex);
 			if (!DecodePropertyValue(br, prop, elementPtr))
 			{
 				if (DebugNet())
@@ -1918,9 +1953,17 @@ void RemoteConnection::Tick(float elapsed)
 			pawn->Name.ToString().c_str(), pawn->GetStateName().ToString().c_str(), (int)pawn->Physics(), (int)pawn->Role(), (int)pawn->RemoteRole(),
 			pawn->Location().x, pawn->Location().y, pawn->Location().z, pawn->Velocity().x, pawn->Velocity().y, pawn->Velocity().z,
 			pawn->Acceleration().x, pawn->Acceleration().y, pawn->Acceleration().z);
+		fprintf(stderr, "[Net] PLAYER CurrentNetSpeed=%d ConfiguredLanSpeed=%d ConfiguredInternetSpeed=%d\n", (int)engine->viewport->GetInt("CurrentNetSpeed"), (int)engine->viewport->GetInt("ConfiguredLanSpeed"), (int)engine->viewport->GetInt("ConfiguredInternetSpeed"));
 		fprintf(stderr, "[Net] PAWNINPUT aBaseY=%.1f aBaseX=%.1f aStrafe=%.1f aForward=%.1f bFire=%d bAltFire=%d\n", pawn->aBaseY(), pawn->aBaseX(), pawn->aStrafe(), pawn->aForward(), (int)pawn->bFire(), (int)pawn->bAltFire());
 		if (UWeapon* weaponObj = pawn->Weapon())
-			fprintf(stderr, "[Net] PAWNWEAPON %s state=%s role=%d\n", weaponObj->Class->Name.ToString().c_str(), weaponObj->GetStateName().ToString().c_str(), (int)weaponObj->Role());
+		{
+			vec3 pvo = weaponObj->GetVector("PlayerViewOffset");
+			fprintf(stderr, "[Net] PAWNWEAPON %s state=%s role=%d PlayerViewOffset=(%.2f,%.2f,%.2f) FireOffset=(%.1f,%.1f,%.1f) Handedness=%.1f bHideWeapon=%d\n", weaponObj->Class->Name.ToString().c_str(), weaponObj->GetStateName().ToString().c_str(), (int)weaponObj->Role(),
+				pvo.x, pvo.y, pvo.z, weaponObj->FireOffset().x, weaponObj->FireOffset().y, weaponObj->FireOffset().z, pawn->Handedness(), (int)weaponObj->GetBool("bHideWeapon"));
+			fprintf(stderr, "[Net] PAWNVIEW FOVAngle=%.1f DefaultFOV=%.1f DesiredFOV=%.1f weapon DrawScale=%.2f PlayerViewScale=%.2f Mesh=%s PlayerViewMesh=%s\n", pawn->GetFloat("FOVAngle"), pawn->GetFloat("DefaultFOV"), pawn->GetFloat("DesiredFOV"),
+				weaponObj->GetFloat("DrawScale"), weaponObj->GetFloat("PlayerViewScale"),
+				weaponObj->GetUObject("Mesh") ? weaponObj->GetUObject("Mesh")->Name.ToString().c_str() : "-", weaponObj->GetUObject("PlayerViewMesh") ? weaponObj->GetUObject("PlayerViewMesh")->Name.ToString().c_str() : "-");
+		}
 	}
 
 	// Resend reliable bunches the server hasn't acked yet: same ChSequence, fresh PacketId.
@@ -2055,6 +2098,13 @@ void RemoteConnection::Tick(float elapsed)
 							int32_t response = ChallengeResponse(challenge);
 							sentLoginReply = true;
 							statusLine = "Logging in...";
+
+							// The real engine sets the player's CurrentNetSpeed when the connection is negotiated (it is
+							// the NETSPEED we announce). Scripts rely on it: PlayerPawn's move replication paces its sends
+							// with 64/CurrentNetSpeed, so at 0 a released fire button or a stop was not reported to the
+							// server for a second or more - the server kept auto-firing.
+							if (engine && engine->viewport)
+								engine->viewport->SetInt("CurrentNetSpeed", 20000);
 							if (DebugNet())
 								fprintf(stderr, "[Net] RemoteConnection: parsed CHALLENGE=%d from server packet %d, computed RESPONSE=%d\n", challenge, packet.packetId, response);
 

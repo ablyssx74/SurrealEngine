@@ -8,6 +8,7 @@
 #include "Packages/Core/UFunction.h"
 #include "Packages/Engine/Subsystems/USurrealAudioDevice.h"
 #include "Engine.h"
+#include "Packages/Engine/Actors/UActor.h"
 #include "Package/PackageManager.h"
 #include "Utils/AlignedAlloc.h"
 #include "Commandlet/VM/DisassemblyCommandlet.h"
@@ -213,6 +214,25 @@ ExpressionValue Frame::Call(UFunction* func, UObject* instance, Array<Expression
 	if (!instance->IsEventEnabled(func->Name))
 	{
 		return ExpressionValue::NothingValue();
+	}
+
+	// SE_DEBUG_TRACE_FUNC=Name1,Name2: log every call of the named functions (class, instance, first float/vector argument).
+	static const std::string traceFuncs = std::getenv("SE_DEBUG_TRACE_FUNC") ? std::string(",") + std::getenv("SE_DEBUG_TRACE_FUNC") + "," : std::string();
+	if (!traceFuncs.empty() && traceFuncs.find("," + func->Name.ToString() + ",") != std::string::npos)
+	{
+		std::string a;
+		for (const ExpressionValue& v : args)
+		{
+			if (v.GetType() == ExpressionValueType::ValueFloat) a += " f=" + std::to_string(v.ToFloat());
+			else if (v.GetType() == ExpressionValueType::ValueByte) a += " b=" + std::to_string((int)v.ToByte());
+			else if (v.GetType() == ExpressionValueType::ValueInt) a += " i=" + std::to_string(v.ToInt());
+			else if (v.GetType() == ExpressionValueType::ValueBool) a += v.ToBool() ? " T" : " F";
+		}
+		UActor* traced = UObject::TryCast<UActor>(instance);
+		char where[96] = "";
+		if (traced)
+			snprintf(where, sizeof(where), " loc=(%.0f,%.0f,%.0f)", traced->Location().x, traced->Location().y, traced->Location().z);
+		fprintf(stderr, "[Trace] %s.%s on %s role=%d%s args:%s\n", instance->Class->Name.ToString().c_str(), func->Name.ToString().c_str(), instance->Name.ToString().c_str(), (int)(traced ? traced->Role() : -1), where, a.c_str());
 	}
 
 	// A client->server net function (ServerMove and friends) called on an actor that the server replicates
