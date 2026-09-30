@@ -1,10 +1,12 @@
 
 #include "Precomp.h"
+#include <chrono>
 #include "VM/Frame.h"
 #include "VM/ExpressionValue.h"
 #include "VM/ExpressionEvaluator.h"
 #include "VM/Bytecode.h"
 #include "Packages/Engine/UViewport.h"
+#include "Packages/Engine/Actors/Info/UZoneInfo.h"
 #include "Packages/Engine/Actors/Inventory/UWeapon.h"
 #include <set>
 #include "RemoteConnection.h"
@@ -1250,6 +1252,24 @@ void RemoteConnection::TryLoadNetworkMap(const std::string& levelName)
 	try
 	{
 		engine->LoadMap(url, {}, /*isNetworkClient=*/true);
+
+		// The package map was resolved before the level was loaded, and GetPackage() gave the level's entry a
+		// separate copy of the map file. Static references to level actors (LevelInfo, zones, movers,
+		// pickups, ...) must resolve into the level that is actually running - Engine::LevelPackage -
+		// or everything the server replicates to them lands on objects the level never uses.
+		if (engine->LevelPackage)
+		{
+			for (RemotePackageMapEntry& entry : packageMapList)
+			{
+				if (entry.package && entry.package != engine->LevelPackage && entry.packageName == engine->LevelPackage->GetPackageName().ToString())
+				{
+					if (DebugNet())
+						fprintf(stderr, "[Net] RemoteConnection: pointing the package map's \"%s\" entry at the running level package\n", entry.packageName.c_str());
+					entry.package = engine->LevelPackage;
+				}
+			}
+		}
+
 		loadedNetworkMap = true;
 		pendingNetworkMapLevel.clear();
 		statusLine.clear();
@@ -1339,6 +1359,8 @@ bool RemoteConnection::TrySendRPC(UObject* instance, UFunction* function, const 
 	const std::string functionName = function->Name.ToString();
 	if (actor->Role() >= ROLE_Authority)
 		return false;
+	if (functionName.compare(0, 10, "ServerMove") == 0 && args.size() > 0 && args[0].GetType() == ExpressionValueType::ValueFloat)
+		lastMoveTimeStamp = args[0].ToFloat();
 
 	// Is this function replicated from here to the server? The class script's replication block gives
 	// each net function a condition - "reliable if( Role<ROLE_Authority ) NextWeapon, ServerMove" - and the
@@ -1798,9 +1820,18 @@ void RemoteConnection::HandleActorBunch(const uint8_t* packetData, int packetSiz
 				decodeTrail += " " + prop->Name.ToString() + "(" + prop->Class->Name.ToString() + ",rep" + std::to_string(repIndex) + ")@" + std::to_string(br.GetBitPos());
 
 			void* elementPtr = prop->GetElement(actor->GetProperty(prop), element);
+			if (DebugNet() && (prop->Name == "TimeDilation" || prop->Name == "Pauser"))
+				fprintf(stderr, "[Net] LEVELPROP incoming %s for %s on channel %d\n", prop->Name.ToString().c_str(), actor->Class->Name.ToString().c_str(), chIndex);
 			if (DebugNet() && prop->Name == "PlayerViewOffset")
 				fprintf(stderr, "[Net] PVO update incoming for %s %s on channel %d\n", actor->Class->Name.ToString().c_str(), actor->Name.ToString().c_str(), chIndex);
-			if (!DecodePropertyValue(br, prop, elementPtr))
+			if (DebugNet() && prop->Name == "TimeDilation")
+			{
+				bool ok = DecodePropertyValue(br, prop, elementPtr);
+				fprintf(stderr, "[Net] LEVELPROP TimeDilation decoded = %.4f (ok=%d) actor=%s %p engine->LevelInfo=%s %p same=%d\n", *(float*)elementPtr, (int)ok,
+					actor->Name.ToString().c_str(), (void*)actor, engine->LevelInfo ? engine->LevelInfo->Name.ToString().c_str() : "-", (void*)engine->LevelInfo, (int)((UObject*)actor == (UObject*)engine->LevelInfo));
+				if (!ok) break;
+			}
+			else if (!DecodePropertyValue(br, prop, elementPtr))
 			{
 				if (DebugNet())
 					fprintf(stderr, "[Net] RemoteConnection: actor channel %d: unsupported property type for \"%s\" - abandoning rest of this bunch\n", chIndex, prop->Name.ToString().c_str());
@@ -1953,6 +1984,20 @@ void RemoteConnection::Tick(float elapsed)
 			pawn->Name.ToString().c_str(), pawn->GetStateName().ToString().c_str(), (int)pawn->Physics(), (int)pawn->Role(), (int)pawn->RemoteRole(),
 			pawn->Location().x, pawn->Location().y, pawn->Location().z, pawn->Velocity().x, pawn->Velocity().y, pawn->Velocity().z,
 			pawn->Acceleration().x, pawn->Acceleration().y, pawn->Acceleration().z);
+		{
+			PointRegion& region = pawn->Region();
+			fprintf(stderr, "[Net] PAWNZONE zone=%s zoneNumber=%d bWaterZone=%d ZoneGravity=(%.0f,%.0f,%.0f) headZone=%s\n",
+				region.Zone ? region.Zone->Name.ToString().c_str() : "(none)", (int)region.ZoneNumber,
+				region.Zone ? (int)region.Zone->GetBool("bWaterZone") : -1,
+				region.Zone ? region.Zone->GetVector("ZoneGravity").x : 0.0f, region.Zone ? region.Zone->GetVector("ZoneGravity").y : 0.0f, region.Zone ? region.Zone->GetVector("ZoneGravity").z : 0.0f,
+				pawn->GetUObject("HeadRegion") ? "?" : "-");
+		}
+		{
+			static const auto wallStart = std::chrono::steady_clock::now();
+			double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - wallStart).count();
+			fprintf(stderr, "[Net] CLOCK wall=%.2f lastMoveTimeStamp=%.2f levelTimeSeconds=%.2f TimeDilation=%.3f\n", wall, lastMoveTimeStamp,
+				engine->LevelInfo ? engine->LevelInfo->GetFloat("TimeSeconds") : -1.0f, engine->LevelInfo ? engine->LevelInfo->GetFloat("TimeDilation") : -1.0f);
+		}
 		fprintf(stderr, "[Net] PLAYER CurrentNetSpeed=%d ConfiguredLanSpeed=%d ConfiguredInternetSpeed=%d\n", (int)engine->viewport->GetInt("CurrentNetSpeed"), (int)engine->viewport->GetInt("ConfiguredLanSpeed"), (int)engine->viewport->GetInt("ConfiguredInternetSpeed"));
 		fprintf(stderr, "[Net] PAWNINPUT aBaseY=%.1f aBaseX=%.1f aStrafe=%.1f aForward=%.1f bFire=%d bAltFire=%d\n", pawn->aBaseY(), pawn->aBaseX(), pawn->aStrafe(), pawn->aForward(), (int)pawn->bFire(), (int)pawn->bAltFire());
 		if (UWeapon* weaponObj = pawn->Weapon())

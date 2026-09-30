@@ -160,6 +160,7 @@ private:
 	std::string decodeTrail; // SE_DEBUG_NET only: the properties decoded so far in the current actor bunch, for diagnosing drift
 	bool lastRefWasDynamic = false; // whether the most recent DecodeObjectRef read a dynamic (channel) ref or a static (package) one - bOpen failure diagnostic only
 	int lastDynamicRefChannel = -1;
+	float lastMoveTimeStamp = 0; // the TimeStamp of the latest ServerMove we sent (debug report only)
 	int lastStaticRefIndex = -1; // flat package-map index of the most recent static ref DecodeObjectRef read, kept only for the bOpen failure diagnostic in HandleActorBunch
 	bool possessedOwnPawn = false; // true once a locally-owned PlayerPawn has been possessed (see step 8's heuristic in the plan)
 	int nextOutgoingPacketId = 2; // 0 was HELLO, 1 was NETSPEED+LOGIN
