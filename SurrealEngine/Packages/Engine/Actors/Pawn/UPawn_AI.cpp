@@ -11,6 +11,20 @@
 #include "Utils/Logger.h"
 #include "Engine.h"
 
+// Whether this is a team game. GameInfo only exists where the game runs (standalone/server); a network client
+// has none and learns it from the replicated GameReplicationInfo, as a real client does.
+static bool IsTeamGame(UPawn* pawn)
+{
+	if (pawn->Level()->Game())
+		return pawn->Level()->Game()->bTeamGame();
+	if (UPlayerPawn* player = UObject::TryCast<UPlayerPawn>(pawn))
+	{
+		if (UObject* gri = player->GetUObject("GameReplicationInfo"))
+			return gri->GetBool("bTeamGame");
+	}
+	return false;
+}
+
 bool UPawn::LineOfSightTo(UActor* other, bool ignoreDistance)
 {
 	if (!other)
@@ -83,7 +97,7 @@ bool UPawn::CanHearNoise(UActor* source, float loudness)
 	vec3 delta = Location() - source->Location();
 	float dist2 = dot(delta, delta);
 
-	if (!bIsPlayer() || !Level()->Game()->bTeamGame() || !noisePawn->bIsPlayer() ||
+	if (!bIsPlayer() || !IsTeamGame(this) || !noisePawn->bIsPlayer() ||
 		(engine->LaunchInfo.ue1Version > 219 && (!PlayerReplicationInfo() || !noisePawn->PlayerReplicationInfo() || (PlayerReplicationInfo()->Team() != noisePawn->PlayerReplicationInfo()->Team()))))
 	{
 		if (dist2 > (4000.0f * 4000.0f) * (loudness * loudness))
@@ -126,7 +140,7 @@ UActor* UPawn::PickTarget(float& bestAim, float& bestDist, const vec3& FireDir, 
 {
 	UActor* bestActor = nullptr;
 	UPlayerReplicationInfo* ourPlayerInfo = engine->LaunchInfo.ue1Version > 219 ? PlayerReplicationInfo() : nullptr;
-	bool teamGame = ourPlayerInfo && Level()->Game()->bTeamGame();
+	bool teamGame = ourPlayerInfo && IsTeamGame(this);
 	for (UPawn* pawn = Level()->PawnList(); pawn != nullptr; pawn = pawn->nextPawn())
 	{
 		// Skip dead pawns or ourselves
