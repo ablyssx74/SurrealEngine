@@ -1,5 +1,8 @@
 
 #include "Precomp.h"
+#include "VM/Frame.h"
+#include "VM/ExpressionValue.h"
+#include "Packages/Engine/UViewport.h"
 #include <set>
 #include "RemoteConnection.h"
 #include "Engine.h"
@@ -250,6 +253,7 @@ namespace
 		}
 
 		int GetBitCount() const { return bitPos; }
+		int GetBit(int i) const { return (bytes[i / 8] >> (i % 8)) & 1; }
 
 		// Writes the packet trailer bit and pads to a byte boundary, then returns the bytes.
 		std::vector<uint8_t> Finish()
@@ -786,7 +790,7 @@ void RemoteConnection::StartNextDownload()
 	int chIndex = AllocateFileChannelIndex();
 	int chSequence = AllocateChSequence(chIndex);
 
-	std::vector<uint8_t> requestPacket = BuildFileChannelRequest(nextOutgoingPacketId++, chIndex, chSequence, pkg.guidHex);
+	std::vector<uint8_t> requestPacket = BuildFileChannelRequest(AllocatePacketId(), chIndex, chSequence, pkg.guidHex);
 	int sent = send(handle, (const char*)requestPacket.data(), (int)requestPacket.size(), 0);
 	if (DebugNet())
 		fprintf(stderr, "[Net] RemoteConnection: requesting download of \"%s\" (GUID=%s) on channel %d -> %d\n",
@@ -1249,6 +1253,256 @@ void RemoteConnection::PossessIfOwnPawn(UActor* actor)
 		fprintf(stderr, "[Net] RemoteConnection: possessing \"%s\" as our own pawn\n", pawn->Name.ToString().c_str());
 }
 
+int RemoteConnection::AllocatePacketId()
+{
+	int id = nextOutgoingPacketId;
+	nextOutgoingPacketId = (nextOutgoingPacketId + 1) % MAX_PACKETID;
+	return id;
+}
+
+// Decodes one RPC parameter into a script value. Each type is decoded by DecodePropertyValue into a
+// correctly typed temporary, then wrapped in an ExpressionValue.
+bool RemoteConnection::DecodeParamValue(BitReader& br, UProperty* param, ExpressionValue& out)
+{
+	switch (param->ValueType)
+	{
+	case ExpressionValueType::ValueByte: { uint8_t v = 0; if (!DecodePropertyValue(br, param, &v)) return false; out = ExpressionValue::ByteValue(v); return true; }
+	case ExpressionValueType::ValueInt: { int32_t v = 0; if (!DecodePropertyValue(br, param, &v)) return false; out = ExpressionValue::IntValue(v); return true; }
+	case ExpressionValueType::ValueFloat: { float v = 0; if (!DecodePropertyValue(br, param, &v)) return false; out = ExpressionValue::FloatValue(v); return true; }
+	case ExpressionValueType::ValueBool:
+	{
+		uint32_t storage = 0; // a bool property's value lives in a mask bit of a 32-bit word
+		UBoolProperty* boolProp = UObject::TryCast<UBoolProperty>(param);
+		if (!boolProp || !DecodePropertyValue(br, param, &storage))
+			return false;
+		out = ExpressionValue::BoolValue(boolProp->GetBool(&storage));
+		return true;
+	}
+	case ExpressionValueType::ValueObject: { UObject* v = nullptr; if (!DecodePropertyValue(br, param, &v)) return false; out = ExpressionValue::ObjectValue(v); return true; }
+	case ExpressionValueType::ValueVector: { vec3 v(0.0f, 0.0f, 0.0f); if (!DecodePropertyValue(br, param, &v)) return false; out = ExpressionValue::VectorValue(v); return true; }
+	case ExpressionValueType::ValueRotator: { Rotator v(0, 0, 0); if (!DecodePropertyValue(br, param, &v)) return false; out = ExpressionValue::RotatorValue(v); return true; }
+	case ExpressionValueType::ValueString: { std::string v; if (!DecodePropertyValue(br, param, &v)) return false; out = ExpressionValue::StringValue(v); return true; }
+	case ExpressionValueType::ValueName: { NameString v; if (!DecodePropertyValue(br, param, &v)) return false; out = ExpressionValue::NameValue(v); return true; }
+	case ExpressionValueType::ValueColor: { Color v = {}; if (!DecodePropertyValue(br, param, &v)) return false; out = ExpressionValue::ColorValue(v); return true; }
+	default: return false;
+	}
+}
+
+// Client->server RPC (see the declaration). The wire form mirrors what HandleActorBunch decodes:
+// the function's RepIndex (ReadInt bounded by the class's MaxIndex), then each parameter in order - a
+// bool is just its bit, anything else is a "present" bit (set when the value isn't zero) followed by
+// the value itself when present.
+bool RemoteConnection::TrySendRPC(UObject* instance, UFunction* function, const Array<ExpressionValue>& args)
+{
+	if (!loadedNetworkMap || handle == remote_invalid_socket_value || !function || !AllFlags(function->FuncFlags, FunctionFlags::Net))
+		return false;
+
+	UActor* actor = UObject::TryCast<UActor>(instance);
+	if (!actor || !actor->Class)
+		return false;
+
+	auto channelIt = actorChannelsByActor.find(actor);
+	if (channelIt == actorChannelsByActor.end())
+		return false; // not an actor the server replicates to us
+
+	const std::string functionName = function->Name.ToString();
+	if (functionName.compare(0, 6, "Server") != 0 || actor->Role() >= ROLE_Authority)
+		return false;
+
+	ClassNetCache* classCache = ClassNetCache::Get(actor->Class);
+	int netIndex = classCache ? classCache->GetFieldNetIndex(function) : -1;
+	if (netIndex < 0)
+		return false;
+
+	const bool wideRotator = engine && engine->LaunchInfo.ue1Version >= 469;
+
+	auto encodeObject = [&](BitWriter& bw, UObject* obj) -> bool
+	{
+		if (!obj)
+		{
+			bw.WriteBit(1); // a dynamic ref to channel 0 is None
+			bw.WriteInt(0, MAX_CHANNELS);
+			return true;
+		}
+		if (UActor* objActor = UObject::TryCast<UActor>(obj))
+		{
+			auto it = actorChannelsByActor.find(objActor);
+			if (it != actorChannelsByActor.end())
+			{
+				bw.WriteBit(1);
+				bw.WriteInt((uint32_t)it->second, MAX_CHANNELS);
+				return true;
+			}
+		}
+		for (const RemotePackageMapEntry& entry : packageMapList)
+		{
+			if (entry.package && entry.package == obj->package && (int)obj->exportIndex < entry.objectCount)
+			{
+				bw.WriteBit(0);
+				bw.WriteInt((uint32_t)(entry.objectBase + (int)obj->exportIndex), (uint32_t)PackageMapMaxObjectIndex());
+				return true;
+			}
+		}
+		return false;
+	};
+
+	auto isZero = [](UProperty* prop, const ExpressionValue& v) -> bool
+	{
+		switch (prop->ValueType)
+		{
+		case ExpressionValueType::ValueByte: return v.ToByte() == 0;
+		case ExpressionValueType::ValueInt: return v.ToInt() == 0;
+		case ExpressionValueType::ValueFloat: return v.ToFloat() == 0.0f;
+		case ExpressionValueType::ValueObject: return v.ToObject() == nullptr;
+		case ExpressionValueType::ValueVector: { const vec3& x = v.ToVector(); return x.x == 0.0f && x.y == 0.0f && x.z == 0.0f; }
+		case ExpressionValueType::ValueRotator: { const Rotator& r = v.ToRotator(); return r.Pitch == 0 && r.Yaw == 0 && r.Roll == 0; }
+		case ExpressionValueType::ValueString: return v.ToString().empty();
+		case ExpressionValueType::ValueColor: { const Color& k = v.ToColor(); return k.R == 0 && k.G == 0 && k.B == 0 && k.A == 0; }
+		default: return false;
+		}
+	};
+
+	auto encodeValue = [&](BitWriter& bw, UProperty* prop, const ExpressionValue& v) -> bool
+	{
+		switch (prop->ValueType)
+		{
+		case ExpressionValueType::ValueByte:
+		{
+			UByteProperty* byteProp = UObject::TryCast<UByteProperty>(prop);
+			int bits = (byteProp && byteProp->EnumType) ? std::max(1, (int)std::ceil(std::log2((double)std::max<size_t>(2, byteProp->EnumType->ElementNames.size())))) : 8;
+			bw.WriteBits(v.ToByte(), bits);
+			return true;
+		}
+		case ExpressionValueType::ValueInt: bw.WriteBits((uint32_t)v.ToInt(), 32); return true;
+		case ExpressionValueType::ValueFloat: { float f = v.ToFloat(); uint32_t bits; memcpy(&bits, &f, 4); bw.WriteBits(bits, 32); return true; }
+		case ExpressionValueType::ValueObject: return encodeObject(bw, v.ToObject());
+		case ExpressionValueType::ValueVector:
+		{
+			// The mirror of the decoder: a magnitude class (the smallest "bits" whose bias exceeds the
+			// largest component), then each component biased into bits+2 bits.
+			const vec3& vec = v.ToVector();
+			int x = (int)std::lround(vec.x), y = (int)std::lround(vec.y), z = (int)std::lround(vec.z);
+			int largest = std::max(std::max(std::abs(x), std::abs(y)), std::abs(z));
+			int bits = 0;
+			while (bits < 15 && (1 << (bits + 1)) <= largest)
+				bits++;
+			int bias = 1 << (bits + 1);
+			int maxVal = 1 << (bits + 2);
+			auto biased = [&](int comp) { return (uint32_t)std::min(std::max(comp + bias, 0), maxVal - 1); };
+			bw.WriteInt((uint32_t)bits, 16);
+			bw.WriteInt(biased(x), (uint32_t)maxVal);
+			bw.WriteInt(biased(y), (uint32_t)maxVal);
+			bw.WriteInt(biased(z), (uint32_t)maxVal);
+			return true;
+		}
+		case ExpressionValueType::ValueRotator:
+		{
+			const Rotator& r = v.ToRotator();
+			const int axisBits = wideRotator ? 14 : 8;
+			const int axisShift = wideRotator ? 2 : 8;
+			const uint32_t mask = (1u << axisBits) - 1;
+			for (int axis : { r.Pitch, r.Yaw, r.Roll })
+			{
+				uint32_t value = ((uint32_t)axis >> axisShift) & mask;
+				bw.WriteBit(value != 0 ? 1 : 0);
+				if (value != 0)
+					bw.WriteBits(value, axisBits);
+			}
+			return true;
+		}
+		case ExpressionValueType::ValueString: bw.WriteString(v.ToString()); return true;
+		case ExpressionValueType::ValueColor: { const Color& k = v.ToColor(); bw.WriteBits(k.R, 8); bw.WriteBits(k.G, 8); bw.WriteBits(k.B, 8); bw.WriteBits(k.A, 8); return true; }
+		default: return false;
+		}
+	};
+
+	BitWriter content;
+	content.WriteInt((uint32_t)netIndex, (uint32_t)classCache->GetMaxIndex());
+
+	size_t argIndex = 0;
+	for (UProperty* param : function->Properties)
+	{
+		if (!AnyFlags(param->PropFlags, PropertyFlags::Parm) || AnyFlags(param->PropFlags, PropertyFlags::ReturnParm))
+			continue;
+
+		const ExpressionValue* value = argIndex < args.size() ? &args[argIndex] : nullptr;
+		argIndex++;
+		const bool hasValue = value && value->GetType() != ExpressionValueType::Nothing;
+
+		if (param->ValueType == ExpressionValueType::ValueBool)
+		{
+			content.WriteBit(hasValue && value->ToBool() ? 1 : 0);
+			continue;
+		}
+
+		const bool present = hasValue && !isZero(param, *value);
+		content.WriteBit(present ? 1 : 0);
+		if (present && !encodeValue(content, param, *value))
+		{
+			if (DebugNet())
+				fprintf(stderr, "[Net] RemoteConnection: can't encode parameter \"%s\" of %s - RPC not sent\n", param->Name.ToString().c_str(), functionName.c_str());
+			return true; // swallow the call: running a Server* function locally on a client actor would be wrong too
+		}
+	}
+
+	if (DebugNet())
+	{
+		static int moveArgLogs = 0;
+		std::string desc;
+		for (size_t i = 0; i < args.size(); i++)
+		{
+			if (args[i].GetType() == ExpressionValueType::ValueVector)
+			{
+				const vec3& vv = args[i].ToVector();
+				char b[80]; snprintf(b, sizeof(b), " v%d=(%.0f,%.0f,%.0f)", (int)i, vv.x, vv.y, vv.z); desc += b;
+			}
+			else if (args[i].GetType() == ExpressionValueType::ValueFloat)
+			{
+				char b[40]; snprintf(b, sizeof(b), " f%d=%.2f", (int)i, args[i].ToFloat()); desc += b;
+			}
+		}
+		if (moveArgLogs < 6 || (moveArgLogs < 400 && desc.find("v1=(0,0,0)") == std::string::npos))
+		{
+			moveArgLogs++;
+			fprintf(stderr, "[Net] RemoteConnection: %s args:%s\n", functionName.c_str(), desc.c_str());
+		}
+	}
+
+	const int chIndex = channelIt->second;
+	const bool reliable = AnyFlags(function->FuncFlags, FunctionFlags::NetReliable);
+	const int chSequence = reliable ? AllocateChSequence(chIndex) : 0;
+	const int packetId = AllocatePacketId();
+
+	BitWriter packet;
+	packet.WriteInt((uint32_t)packetId, MAX_PACKETID);
+	WriteBunch(packet, /*bOpen=*/false, /*bClose=*/false, reliable, chIndex, CHTYPE_Actor, chSequence, content);
+	std::vector<uint8_t> bytes = packet.Finish();
+	int sent = send(handle, (const char*)bytes.data(), (int)bytes.size(), 0);
+
+	static int sentRpcCount = 0;
+	if (DebugNet() && (sentRpcCount++ < 12 || sentRpcCount % 200 == 0))
+		fprintf(stderr, "[Net] RemoteConnection: sent RPC %s on channel %d (%d content bits, %s) -> %d\n", functionName.c_str(), chIndex, content.GetBitCount(), reliable ? "reliable" : "unreliable", sent);
+
+	if (reliable)
+	{
+		PendingReliable pending;
+		pending.packetId = packetId;
+		pending.chIndex = chIndex;
+		pending.chSequence = chSequence;
+		pending.contentBits = content.GetBitCount();
+		for (int i = 0; i < pending.contentBits; i += 8)
+		{
+			uint8_t b = 0;
+			for (int j = 0; j < 8 && i + j < pending.contentBits; j++)
+				b |= (uint8_t)(content.GetBit(i + j) << j);
+			pending.content.push_back(b);
+		}
+		pending.sentAt = netClock;
+		pendingReliable.push_back(std::move(pending));
+	}
+	return true;
+}
+
 // Decodes one actor-channel bunch (reimplements UActorChannel::ReceivedBunch - real UT99 source,
 // UnChan.cpp): a fresh channel's bunch must be bOpen and resolves an object reference to either an
 // already-loaded actor or a class to dynamically spawn (see DecodeObjectRef); either way, every
@@ -1449,12 +1703,12 @@ void RemoteConnection::HandleActorBunch(const uint8_t* packetData, int packetSiz
 		}
 		else
 		{
-			// RPC call: parse (and discard) parameters to stay bit-aligned - actually invoking
-			// UnrealScript functions from network RPCs is deferred (see the class doc comment).
+			// RPC call from the server: decode the parameters, then run the function on the actor.
 			UFunction* function = UObject::TryCast<UFunction>(field);
 			if (!function)
 				break;
 
+			Array<ExpressionValue> callArgs;
 			bool paramError = false;
 			for (UProperty* param : function->Properties)
 			{
@@ -1468,23 +1722,41 @@ void RemoteConnection::HandleActorBunch(const uint8_t* packetData, int packetSiz
 					paramError = true;
 					break;
 				}
+				ExpressionValue value;
 				if (present)
 				{
-					uint8_t scratch[16] = {};
-					std::string scratchString; // a string parameter needs a live std::string to decode into, not raw zeroed bytes
-					void* scratchTarget = (param->ValueType == ExpressionValueType::ValueString) ? static_cast<void*>(&scratchString) : static_cast<void*>(scratch);
-					if (!DecodePropertyValue(br, param, scratchTarget))
+					if (!DecodeParamValue(br, param, value))
 					{
 						paramError = true;
 						break;
 					}
 				}
+				else
+				{
+					value = ExpressionValue::DefaultValue(param);
+				}
+				callArgs.push_back(std::move(value));
 			}
 			if (paramError)
 			{
 				if (DebugNet())
 					fprintf(stderr, "[Net] RemoteConnection: actor channel %d: couldn't parse parameters for RPC \"%s\" - abandoning rest of this bunch\n", chIndex, function->Name.ToString().c_str());
 				break;
+			}
+
+			if (AnyFlags(function->FuncFlags, FunctionFlags::Net))
+			{
+				if (DebugNet())
+					fprintf(stderr, "[Net] RemoteConnection: RPC %s on channel %d (%s)\n", function->Name.ToString().c_str(), chIndex, actor->Class->Name.ToString().c_str());
+				try
+				{
+					Frame::Call(function, actor, std::move(callArgs));
+				}
+				catch (const std::exception& e)
+				{
+					if (DebugNet())
+						fprintf(stderr, "[Net] RemoteConnection: RPC %s failed: %s\n", function->Name.ToString().c_str(), e.what());
+				}
 			}
 		}
 
@@ -1511,6 +1783,40 @@ void RemoteConnection::Tick(float elapsed)
 {
 	if (handle == remote_invalid_socket_value)
 		return;
+
+	netClock += elapsed;
+
+	// SE_DEBUG_NET: what state is our own pawn in? (why is it, or isn't it, walking)
+	static double nextPawnReport = 0;
+	if (DebugNet() && possessedOwnPawn && netClock >= nextPawnReport && engine && engine->viewport && engine->viewport->Actor())
+	{
+		nextPawnReport = netClock + 2.0;
+		UPlayerPawn* pawn = engine->viewport->Actor();
+		fprintf(stderr, "[Net] PAWN %s state=%s physics=%d role=%d remoteRole=%d loc=(%.0f,%.0f,%.0f) vel=(%.0f,%.0f,%.0f) accel=(%.0f,%.0f,%.0f)\n",
+			pawn->Name.ToString().c_str(), pawn->GetStateName().ToString().c_str(), (int)pawn->Physics(), (int)pawn->Role(), (int)pawn->RemoteRole(),
+			pawn->Location().x, pawn->Location().y, pawn->Location().z, pawn->Velocity().x, pawn->Velocity().y, pawn->Velocity().z,
+			pawn->Acceleration().x, pawn->Acceleration().y, pawn->Acceleration().z);
+		fprintf(stderr, "[Net] PAWNINPUT aBaseY=%.1f aBaseX=%.1f aStrafe=%.1f aForward=%.1f bFire=%d\n", pawn->aBaseY(), pawn->aBaseX(), pawn->aStrafe(), pawn->aForward(), (int)pawn->bFire());
+	}
+
+	// Resend reliable bunches the server hasn't acked yet: same ChSequence, fresh PacketId.
+	for (PendingReliable& pending : pendingReliable)
+	{
+		if (netClock - pending.sentAt < 0.5)
+			continue;
+		BitWriter content;
+		for (int i = 0; i < pending.contentBits; i++)
+			content.WriteBit((pending.content[i / 8] >> (i % 8)) & 1);
+		pending.packetId = AllocatePacketId();
+		BitWriter packet;
+		packet.WriteInt((uint32_t)pending.packetId, MAX_PACKETID);
+		WriteBunch(packet, false, false, true, pending.chIndex, CHTYPE_Actor, pending.chSequence, content);
+		std::vector<uint8_t> bytes = packet.Finish();
+		send(handle, (const char*)bytes.data(), (int)bytes.size(), 0);
+		pending.sentAt = netClock;
+		if (DebugNet())
+			fprintf(stderr, "[Net] RemoteConnection: resent reliable bunch (channel %d, sequence %d) as packet %d\n", pending.chIndex, pending.chSequence, pending.packetId);
+	}
 
 	if (!loadedNetworkMap && !pendingNetworkMapLevel.empty())
 	{
@@ -1549,6 +1855,11 @@ void RemoteConnection::Tick(float elapsed)
 					fprintf(stderr, "[Net] RemoteConnection: received data too short to contain a PacketId - ignoring\n");
 				continue;
 			}
+
+			// Anything the server acks no longer needs resending.
+			for (int ackedId : packet.acks)
+				pendingReliable.erase(std::remove_if(pendingReliable.begin(), pendingReliable.end(),
+					[ackedId](const PendingReliable& p) { return p.packetId == ackedId; }), pendingReliable.end());
 			if (DebugNet() && (packet.acks.size() > 1 || packet.bunches.size() > 1))
 				fprintf(stderr, "[Net] RemoteConnection: packet %d carries %d ack(s) and %d bunch(es)\n",
 					packet.packetId, (int)packet.acks.size(), (int)packet.bunches.size());
@@ -1642,7 +1953,7 @@ void RemoteConnection::Tick(float elapsed)
 					else if (sentLoginReply && !sentJoin && text.rfind("WELCOME ", 0) == 0)
 					{
 						sentJoin = true;
-						std::vector<uint8_t> joinPacket = BuildJoinPacket(nextOutgoingPacketId++, packet.packetId, AllocateChSequence(0));
+						std::vector<uint8_t> joinPacket = BuildJoinPacket(AllocatePacketId(), packet.packetId, AllocateChSequence(0));
 						int sent = send(handle, (const char*)joinPacket.data(), (int)joinPacket.size(), 0);
 						if (DebugNet())
 							fprintf(stderr, "[Net] RemoteConnection: parsed \"%s\", sent %d-byte JOIN reply -> %d\n", text.c_str(), (int)joinPacket.size(), sent);
@@ -1662,7 +1973,7 @@ void RemoteConnection::Tick(float elapsed)
 
 			if (!acked)
 			{
-				std::vector<uint8_t> ackPacket = BuildAckPacket(nextOutgoingPacketId++, packet.packetId);
+				std::vector<uint8_t> ackPacket = BuildAckPacket(AllocatePacketId(), packet.packetId);
 				int sent = send(handle, (const char*)ackPacket.data(), (int)ackPacket.size(), 0);
 				if (DebugNet())
 					fprintf(stderr, "[Net] RemoteConnection: sent %d-byte ack of server packet %d -> %d\n", (int)ackPacket.size(), packet.packetId, sent);

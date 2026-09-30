@@ -215,6 +215,13 @@ ExpressionValue Frame::Call(UFunction* func, UObject* instance, Array<Expression
 		return ExpressionValue::NothingValue();
 	}
 
+	// A client->server net function (ServerMove and friends) called on an actor that the server replicates
+	// to us is sent over the network instead of being run here - the server runs it.
+	if (AllFlags(func->FuncFlags, FunctionFlags::Net) && engine && engine->remoteConnection.TrySendRPC(instance, func, args))
+	{
+		return ExpressionValue::NothingValue();
+	}
+
 	// Trailing optional args may be missing. Add nothing values so the args list matches the function signature.
 	int argindex = 0;
 	for (UField* field = func->Children; field != nullptr; field = field->Next)

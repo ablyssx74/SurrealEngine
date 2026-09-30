@@ -12,6 +12,9 @@ class UActor;
 class UClass;
 class UPlayerPawn;
 class UProperty;
+class UFunction;
+class ExpressionValue;
+template<typename T> class Array;
 class BitReader; // defined in RemoteConnection.cpp - shared between the packet parser and the actor/property decoder below
 
 #ifdef WIN32
@@ -115,6 +118,13 @@ public:
 	// an ICMP port-unreachable surfacing as a receive error) via SE_DEBUG_NET.
 	void Tick(float elapsed);
 
+	// Called by the script VM for every call of a net function (FUNC_Net). If this is a client->server
+	// RPC on an actor the server replicates to us - by UnrealScript convention a "Server*" function
+	// called while the actor's Role is below authority (ServerMove, ServerReStartPlayer, ...) - it is
+	// encoded as an actor-channel RPC bunch and sent to the server, and true is returned: the caller
+	// must then NOT run the function locally (the server runs it). Anything else returns false.
+	bool TrySendRPC(UObject* instance, UFunction* function, const Array<ExpressionValue>& args);
+
 	// A short, human-readable line describing what this connection is currently doing
 	// ("Connecting to host:port...", "Downloading X.utx: 42% (1.2/4.9 MB)", "Loading map X...") -
 	// empty once there's nothing worth telling the player about (not connected, or fully joined).
@@ -193,4 +203,25 @@ private:
 	// means whatever bits it already consumed can't be trusted either - callers must stop decoding
 	// the rest of that bunch, not just skip this one field.
 	bool DecodePropertyValue(BitReader& br, UProperty* prop, void* elementPtr);
+
+	// Decodes one RPC parameter into a script value (the receive-side twin of TrySendRPC's encoder).
+	bool DecodeParamValue(BitReader& br, UProperty* param, ExpressionValue& out);
+
+	// Next outgoing PacketId, wrapping at the wire format's MAX_PACKETID (16384) - a client that sends
+	// movement every frame gets there within minutes.
+	int AllocatePacketId();
+
+	// A reliable bunch we sent and haven't seen acked yet; resent (same ChSequence, new PacketId) until it is.
+	struct PendingReliable
+	{
+		int packetId = 0;
+		int chIndex = 0;
+		int chSequence = 0;
+		std::vector<uint8_t> payloadPacket; // the whole packet as first sent (PacketId is rewritten on resend)
+		std::vector<uint8_t> content;       // the bunch content bits, packed LSB-first
+		int contentBits = 0;
+		double sentAt = 0;
+	};
+	std::vector<PendingReliable> pendingReliable;
+	double netClock = 0; // seconds since the connection started ticking, for retransmit timing
 };
