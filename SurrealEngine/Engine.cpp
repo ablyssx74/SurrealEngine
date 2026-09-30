@@ -754,6 +754,15 @@ void Engine::LoadMap(const UnrealURL& url, const std::map<std::string, std::stri
 		for (UActor* actor : Level->Actors)
 			if (actor)
 				actor->Destroy();
+
+		// What's left is the level's static actors (movers, triggers, ...) - the ones the server
+		// replicates by reference. On this client they are the server's proxies: swap Role and
+		// RemoteRole, as the real engine does, so they run as simulated proxies instead of as
+		// authority. Actors with RemoteRole None have no counterpart on the server and keep running
+		// on their own (torches, decorations, ...).
+		for (UActor* actor : Level->Actors)
+			if (actor && !actor->bDeleteMe() && actor->RemoteRole() != ROLE_None)
+				std::swap(actor->Role(), actor->RemoteRole());
 	}
 
 	// Find the game info class and spawn it - server-only; GameInfo stays null for a network client.
