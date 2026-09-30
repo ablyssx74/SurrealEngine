@@ -2,6 +2,7 @@
 #include "Precomp.h"
 #include <chrono>
 #include "VM/Frame.h"
+#include "VM/ScriptCall.h"
 #include "VM/ExpressionValue.h"
 #include "VM/ExpressionEvaluator.h"
 #include "VM/Bytecode.h"
@@ -1655,6 +1656,7 @@ void RemoteConnection::HandleActorBunch(const uint8_t* packetData, int packetSiz
 		br.ReadBits(subBit);
 
 	UActor* actor = nullptr;
+	bool firstBunchOfActor = false; // true while handling the bunch that opens this actor's channel
 	auto existing = activeActorChannels.find(chIndex);
 	if (existing != activeActorChannels.end())
 	{
@@ -1725,6 +1727,7 @@ void RemoteConnection::HandleActorBunch(const uint8_t* packetData, int packetSiz
 
 		activeActorChannels[chIndex] = actor;
 		actorChannelsByActor[actor] = chIndex;
+		firstBunchOfActor = true;
 		PossessIfOwnPawn(actor);
 	}
 
@@ -1820,6 +1823,12 @@ void RemoteConnection::HandleActorBunch(const uint8_t* packetData, int packetSiz
 				decodeTrail += " " + prop->Name.ToString() + "(" + prop->Class->Name.ToString() + ",rep" + std::to_string(repIndex) + ")@" + std::to_string(br.GetBitPos());
 
 			void* elementPtr = prop->GetElement(actor->GetProperty(prop), element);
+			{
+				// SE_NET_LOG_PROPS=ripper,UT_FlakCannon: log every property the server sends for these classes.
+				static const std::string logProps = getenv("SE_NET_LOG_PROPS") ? std::string(",") + getenv("SE_NET_LOG_PROPS") + "," : std::string();
+				if (!logProps.empty() && logProps.find("," + actor->Class->Name.ToString() + ",") != std::string::npos)
+					fprintf(stderr, "[Net] PROP %s ch=%d %s (rep %u)\n", actor->Class->Name.ToString().c_str(), chIndex, prop->Name.ToString().c_str(), repIndex);
+			}
 			if (DebugNet() && (prop->Name == "TimeDilation" || prop->Name == "Pauser"))
 				fprintf(stderr, "[Net] LEVELPROP incoming %s for %s on channel %d\n", prop->Name.ToString().c_str(), actor->Class->Name.ToString().c_str(), chIndex);
 			if (DebugNet() && prop->Name == "PlayerViewOffset")
@@ -1907,6 +1916,36 @@ void RemoteConnection::HandleActorBunch(const uint8_t* packetData, int packetSiz
 	{
 		fprintf(stderr, "[Net] BUNCHEND class=%s end=%s remain=%d last=%s\n", actor->Class->Name.ToString().c_str(),
 			field ? "BROKE" : "natural", remainBeforeRep, lastFieldName.c_str());
+	}
+
+	// A client runs PostNetBeginPlay on an actor once its first replicated state has arrived - scripts use
+	// it to finish setting themselves up from that state (a weapon scaling its view offset, for one).
+	if (firstBunchOfActor && actor)
+	{
+		try
+		{
+			CallEvent(actor, NameString("PostNetBeginPlay"));
+
+			// A weapon that has just arrived as ours needs its view offset scaled and mirrored for handedness. The
+			// server only does that for the weapon you start with (ServerSetHandedness at login): every
+			// weapon picked up afterwards arrives with its raw default offset (e.g. 1.5,-1.0,-1.65 instead of
+			// 150,-100,-165) and would be drawn on top of the camera. Weapon.SetHand is the script that does it.
+			if (UWeapon* weapon = UObject::TryCast<UWeapon>(actor))
+			{
+				UPlayerPawn* ownPawn = engine && engine->viewport ? engine->viewport->Actor() : nullptr;
+				if (ownPawn && weapon->Owner() == ownPawn)
+				{
+					if (DebugNet())
+						fprintf(stderr, "[Net] RemoteConnection: calling SetHand(%.1f) on our new %s\n", ownPawn->Handedness(), weapon->Class->Name.ToString().c_str());
+					CallEvent(weapon, NameString("SetHand"), { ExpressionValue::FloatValue(ownPawn->Handedness()) });
+				}
+			}
+		}
+		catch (const std::exception& e)
+		{
+			if (DebugNet())
+				fprintf(stderr, "[Net] RemoteConnection: PostNetBeginPlay failed on %s: %s\n", actor->Name.ToString().c_str(), e.what());
+		}
 	}
 
 	if (bClose)
