@@ -2,6 +2,8 @@
 #include "Precomp.h"
 #include "VM/Frame.h"
 #include "VM/ExpressionValue.h"
+#include "VM/ExpressionEvaluator.h"
+#include "VM/Bytecode.h"
 #include "Packages/Engine/UViewport.h"
 #include <set>
 #include "RemoteConnection.h"
@@ -1306,7 +1308,39 @@ bool RemoteConnection::TrySendRPC(UObject* instance, UFunction* function, const 
 		return false; // not an actor the server replicates to us
 
 	const std::string functionName = function->Name.ToString();
-	if (functionName.compare(0, 6, "Server") != 0 || actor->Role() >= ROLE_Authority)
+	if (actor->Role() >= ROLE_Authority)
+		return false;
+
+	// Is this function replicated from here to the server? The class script's replication block gives
+	// each net function a condition - "reliable if( Role<ROLE_Authority ) NextWeapon, ServerMove" - and the
+	// function remembers where in the declaring class's bytecode that condition lives (ReplicationOffset).
+	// Evaluating it in the actor's context is exactly how the real engine decides, and it is what makes
+	// exec functions such as NextWeapon (which the server, not the client, must run) go over the wire.
+	bool replicatesToServer = false;
+	bool evaluated = false;
+	try
+	{
+		UClass* declaringClass = UObject::TryCast<UClass>(function->Outer());
+		if (declaringClass && declaringClass->Code)
+		{
+			int statementIndex = declaringClass->Code->FindStatementIndex(function->ReplicationOffset);
+			if (statementIndex >= 0 && statementIndex < (int)declaringClass->Code->Statements.size())
+			{
+				ExpressionEvalResult result = ExpressionEvaluator::Eval(declaringClass->Code->Statements[statementIndex], actor, actor, nullptr);
+				if (result.Value.GetType() != ExpressionValueType::Nothing)
+				{
+					replicatesToServer = result.Value.ToBool();
+					evaluated = true;
+				}
+			}
+		}
+	}
+	catch (const std::exception&)
+	{
+	}
+	if (!evaluated)
+		replicatesToServer = functionName.compare(0, 6, "Server") == 0; // fallback: the naming convention for client->server functions
+	if (!replicatesToServer)
 		return false;
 
 	ClassNetCache* classCache = ClassNetCache::Get(actor->Class);
@@ -1479,8 +1513,10 @@ bool RemoteConnection::TrySendRPC(UObject* instance, UFunction* function, const 
 	std::vector<uint8_t> bytes = packet.Finish();
 	int sent = send(handle, (const char*)bytes.data(), (int)bytes.size(), 0);
 
-	static int sentRpcCount = 0;
-	if (DebugNet() && (sentRpcCount++ < 12 || sentRpcCount % 200 == 0))
+	static std::map<std::string, int> sentRpcCounts;
+	int& sentThisFunction = sentRpcCounts[functionName];
+	sentThisFunction++;
+	if (DebugNet() && (sentThisFunction <= 4 || sentThisFunction % 200 == 0))
 		fprintf(stderr, "[Net] RemoteConnection: sent RPC %s on channel %d (%d content bits, %s) -> %d\n", functionName.c_str(), chIndex, content.GetBitCount(), reliable ? "reliable" : "unreliable", sent);
 
 	if (reliable)
