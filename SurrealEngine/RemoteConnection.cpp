@@ -1,5 +1,6 @@
 
 #include "Precomp.h"
+#include <set>
 #include "RemoteConnection.h"
 #include "Engine.h"
 #include "ClassNetCache.h"
@@ -1072,6 +1073,17 @@ bool RemoteConnection::DecodePropertyValue(BitReader& br, UProperty* prop, void*
 		*(UObject**)elementPtr = obj;
 		return true;
 	}
+	case ExpressionValueType::ValueColor:
+	{
+		// A Color (R,G,B,A bytes) goes over the wire as each member's byte in declaration order.
+		Color col;
+		col.R = (uint8_t)br.ReadBits(8);
+		col.G = (uint8_t)br.ReadBits(8);
+		col.B = (uint8_t)br.ReadBits(8);
+		col.A = (uint8_t)br.ReadBits(8);
+		*(Color*)elementPtr = col;
+		return !br.IsError();
+	}
 	case ExpressionValueType::ValueString:
 		// UStrProperty::NetSerializeItem is a plain FString: compact length, then that many bytes
 		// including the null terminator (BitReader::ReadString already strips it).
@@ -1115,11 +1127,17 @@ bool RemoteConnection::DecodePropertyValue(BitReader& br, UProperty* prop, void*
 	}
 	case ExpressionValueType::ValueRotator:
 	{
-		// Per-axis "is nonzero" bit gates whether a byte (the axis's high 8 bits) follows.
+		// Per-axis "is nonzero" bit gates whether the axis value follows. Up to v436 that's one byte
+		// (the axis's high 8 bits); v469 sends more precision: 14 bits, i.e. the axis shifted right by 2.
+		// The 469 width was found by replaying captured actor bunches offline: it's the only width that
+		// makes the great majority of real bunches end exactly on their last bit (see BUNCHEND logging).
+		const bool wideRotator = engine && engine->LaunchInfo.ue1Version >= 469;
+		const int axisBits = wideRotator ? 14 : 8;
+		const int axisShift = wideRotator ? 2 : 8;
 		Rotator r(0, 0, 0);
-		if (br.ReadBit()) r.Pitch = ((int)br.ReadBits(8)) << 8;
-		if (br.ReadBit()) r.Yaw = ((int)br.ReadBits(8)) << 8;
-		if (br.ReadBit()) r.Roll = ((int)br.ReadBits(8)) << 8;
+		if (br.ReadBit()) r.Pitch = ((int)br.ReadBits(axisBits)) << axisShift;
+		if (br.ReadBit()) r.Yaw = ((int)br.ReadBits(axisBits)) << axisShift;
+		if (br.ReadBit()) r.Roll = ((int)br.ReadBits(axisBits)) << axisShift;
 		*(Rotator*)elementPtr = r;
 		return true;
 	}
@@ -1338,10 +1356,80 @@ void RemoteConnection::HandleActorBunch(const uint8_t* packetData, int packetSiz
 		return;
 
 	decodeTrail = actor->Class->Name.ToString() + ":";
+	// SE_NET_CAPTURE (with SE_DEBUG_NET) dumps every class's replicated field table and every actor bunch's raw bits so the
+	// decoder can be replayed offline against format variants.
+	if (DebugNet() && getenv("SE_NET_CAPTURE"))
+	{
+		auto vtName = [](UProperty* pr) -> std::string
+		{
+			switch (pr->ValueType)
+			{
+			case ExpressionValueType::ValueByte: return "Byte";
+			case ExpressionValueType::ValueInt: return "Int";
+			case ExpressionValueType::ValueBool: return "Bool";
+			case ExpressionValueType::ValueFloat: return "Float";
+			case ExpressionValueType::ValueObject: return "Object";
+			case ExpressionValueType::ValueVector: return "Vector";
+			case ExpressionValueType::ValueRotator: return "Rotator";
+			case ExpressionValueType::ValueString: return "String";
+			case ExpressionValueType::ValueName: return "Name";
+			case ExpressionValueType::ValueColor: return "Color";
+			case ExpressionValueType::ValueStruct:
+			{
+				UStructProperty* sp = UObject::TryCast<UStructProperty>(pr);
+				return std::string("Struct:") + ((sp && sp->Struct) ? sp->Struct->Name.ToString() : "?");
+			}
+			case ExpressionValueType::ValueCoords: return "Coords";
+			case ExpressionValueType::ValueQuat: return "Quat";
+			case ExpressionValueType::ValueArray: return "Array";
+			default: return "Nothing";
+			}
+		};
+		auto enumN = [](UProperty* pr) -> int
+		{
+			UByteProperty* bp = UObject::TryCast<UByteProperty>(pr);
+			return (bp && bp->EnumType) ? (int)bp->EnumType->ElementNames.size() : 0;
+		};
+		static std::set<UClass*> capturedClasses;
+		if (capturedClasses.insert(actor->Class).second)
+		{
+			fprintf(stderr, "CAPCLASS %s %d\n", actor->Class->Name.ToString().c_str(), classCache->GetMaxIndex());
+			for (int i = 0; i < classCache->GetMaxIndex(); i++)
+			{
+				UField* f = classCache->GetFromIndex(i);
+				if (!f) { fprintf(stderr, "CAPFIELD %d X - - 0 0\n", i); continue; }
+				if (UProperty* pr = UObject::TryCast<UProperty>(f))
+					fprintf(stderr, "CAPFIELD %d P %s %s %d %d\n", i, pr->Name.ToString().c_str(), vtName(pr).c_str(), enumN(pr), (int)pr->ArrayDimension);
+				else if (UFunction* fn = UObject::TryCast<UFunction>(f))
+				{
+					fprintf(stderr, "CAPFIELD %d F %s - 0 0\n", i, fn->Name.ToString().c_str());
+					int j = 0;
+					for (UProperty* pp : fn->Properties)
+					{
+						if (!AnyFlags(pp->PropFlags, PropertyFlags::Parm) || AnyFlags(pp->PropFlags, PropertyFlags::ReturnParm))
+							continue;
+						fprintf(stderr, "CAPPARAM %d %d %s %s %d %d\n", i, j++, pp->Name.ToString().c_str(), vtName(pp).c_str(), enumN(pp), (int)pp->ArrayDimension);
+					}
+				}
+			}
+			fprintf(stderr, "CAPEND %s\n", actor->Class->Name.ToString().c_str());
+		}
+		BitReader cap(packetData + byteOff, packetSize - byteOff, subBit + contentBits);
+		if (subBit)
+			cap.ReadBits(subBit);
+		std::string capBits;
+		for (int i = 0; i < contentBits; i++)
+			capBits += cap.ReadBit() ? '1' : '0';
+		fprintf(stderr, "CAPBUNCH %d %s %d %d %d %s\n", chIndex, actor->Class->Name.ToString().c_str(), (int)bOpen, br.GetBitPos() - subBit, contentBits, capBits.c_str());
+	}
+
+	int remainBeforeRep = br.RemainingBits(); // end-of-bunch alignment check: a correctly decoded bunch leaves 0 bits when the final index read fails
+	std::string lastFieldName;
 	uint32_t repIndex = br.ReadInt((uint32_t)classCache->GetMaxIndex());
 	UField* field = br.IsError() ? nullptr : classCache->GetFromIndex((int)repIndex);
 	while (field)
 	{
+		lastFieldName = field->Name.ToString() + "(" + field->Class->Name.ToString() + ")";
 		UProperty* prop = UObject::TryCast<UProperty>(field);
 		if (prop)
 		{
@@ -1402,8 +1490,14 @@ void RemoteConnection::HandleActorBunch(const uint8_t* packetData, int packetSiz
 
 		if (br.IsError())
 			break;
+		remainBeforeRep = br.RemainingBits();
 		repIndex = br.ReadInt((uint32_t)classCache->GetMaxIndex());
 		field = br.IsError() ? nullptr : classCache->GetFromIndex((int)repIndex);
+	}
+	if (DebugNet())
+	{
+		fprintf(stderr, "[Net] BUNCHEND class=%s end=%s remain=%d last=%s\n", actor->Class->Name.ToString().c_str(),
+			field ? "BROKE" : "natural", remainBeforeRep, lastFieldName.c_str());
 	}
 
 	if (bClose)
