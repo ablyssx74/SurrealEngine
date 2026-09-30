@@ -252,8 +252,14 @@ void GLUploadManager::UploadData(GLTexture2D* image, const TextureInfo& Info, bo
 				// can still respecify each level outright via glCompressedTexImage2D rather than
 				// being constrained to glCompressedTexSubImage2D's "must fit the level exactly
 				// as allocated" requirement.
+				// The data is padded up to whole 4x4 blocks (mipwidth/mipheight are clamped to minSize), but the
+				// level itself must be declared at its real size, max(1, base >> level): the 2x2 and 1x1 levels
+				// of a compressed chain are each one block of data. Declaring them as 4x4 instead makes the
+				// mip chain inconsistent, so the texture is incomplete and samples as black.
+				int levelWidth = std::max<int>(Mip->Width, 1);
+				int levelHeight = std::max<int>(Mip->Height, 1);
 				glBindTexture(GL_TEXTURE_2D, image->Handle);
-				glCompressedTexImage2D(GL_TEXTURE_2D, level + dummyMipmapCount, uploader->GetInternalformat(), mipwidth, mipheight, 0, mipsize, data);
+				glCompressedTexImage2D(GL_TEXTURE_2D, level + dummyMipmapCount, uploader->GetInternalformat(), levelWidth, levelHeight, 0, mipsize, data);
 				ThrowIfGLError("UploadData(compressed) failed");
 			}
 
