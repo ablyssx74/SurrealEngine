@@ -5,6 +5,7 @@
 #include "VM/ExpressionEvaluator.h"
 #include "VM/Bytecode.h"
 #include "Packages/Engine/UViewport.h"
+#include "Packages/Engine/Actors/Inventory/UWeapon.h"
 #include <set>
 #include "RemoteConnection.h"
 #include "Engine.h"
@@ -1097,20 +1098,11 @@ bool RemoteConnection::DecodePropertyValue(BitReader& br, UProperty* prop, void*
 		return !br.IsError();
 	case ExpressionValueType::ValueName:
 	{
-		// UNameProperty::NetSerializeItem -> UPackageMap::SerializeName: one bit selects a hardcoded
-		// engine name versus a package name (a flat index into the package list's name tables).
-		// Hardcoded names need the engine's built-in name enum, which isn't reproduced here, so those
-		// stop the bunch like any other unsupported type. NOTE: the package-name path is verified
-		// against live server traffic only (see the SE_DEBUG_NET log lines).
-		bool hardcoded = br.ReadBit() != 0;
-		if (br.IsError())
-			return false;
-		if (hardcoded)
-		{
-			if (DebugNet())
-				fprintf(stderr, "[Net] RemoteConnection: Name \"%s\" is a hardcoded engine name (not supported)\n", prop->Name.ToString().c_str());
-			return false;
-		}
+		// A Name on the wire is a flat index into the concatenated name tables of the package list (the
+		// name-table twin of a static object ref), bounded by the total name count. Verified against a
+		// captured ClientAdjustPosition: the 15 bits read 4680, exactly "PlayerWalking" in Engine's table,
+		// and the remaining parameters then ended exactly on the bunch's last bit. (An earlier version
+		// read a "hardcoded name" flag bit first; on v469 there is no such bit.)
 		uint32_t nameIndex = br.ReadInt((uint32_t)PackageMapMaxNameIndex());
 		std::string decoded;
 		if (br.IsError() || !PackageMapIndexToName((int)nameIndex, decoded))
@@ -1494,8 +1486,12 @@ bool RemoteConnection::TrySendRPC(UObject* instance, UFunction* function, const 
 			{
 				char b[40]; snprintf(b, sizeof(b), " f%d=%.2f", (int)i, args[i].ToFloat()); desc += b;
 			}
+			else if (args[i].GetType() == ExpressionValueType::ValueBool)
+			{
+				desc += args[i].ToBool() ? " b" + std::to_string(i) + "=1" : "";
+			}
 		}
-		if (moveArgLogs < 6 || (moveArgLogs < 400 && desc.find("v1=(0,0,0)") == std::string::npos))
+		if (moveArgLogs < 6 || (moveArgLogs < 2000 && (desc.find(" b") != std::string::npos || desc.find("v1=(0,0,0)") == std::string::npos)))
 		{
 			moveArgLogs++;
 			fprintf(stderr, "[Net] RemoteConnection: %s args:%s\n", functionName.c_str(), desc.c_str());
@@ -1619,6 +1615,8 @@ void RemoteConnection::HandleActorBunch(const uint8_t* packetData, int packetSiz
 			if (!engine || !engine->LevelInfo)
 				return;
 			actor = engine->LevelInfo->Spawn(spawnClass, std::nullopt, std::nullopt, location, Rotator(0, 0, 0));
+			if (actor && actor->RemoteRole() != ROLE_None)
+				std::swap(actor->Role(), actor->RemoteRole()); // the real engine's bRemoteOwned spawn: on this client the actor is the server's proxy
 			if (!actor)
 			{
 				if (DebugNet())
@@ -1832,7 +1830,9 @@ void RemoteConnection::Tick(float elapsed)
 			pawn->Name.ToString().c_str(), pawn->GetStateName().ToString().c_str(), (int)pawn->Physics(), (int)pawn->Role(), (int)pawn->RemoteRole(),
 			pawn->Location().x, pawn->Location().y, pawn->Location().z, pawn->Velocity().x, pawn->Velocity().y, pawn->Velocity().z,
 			pawn->Acceleration().x, pawn->Acceleration().y, pawn->Acceleration().z);
-		fprintf(stderr, "[Net] PAWNINPUT aBaseY=%.1f aBaseX=%.1f aStrafe=%.1f aForward=%.1f bFire=%d\n", pawn->aBaseY(), pawn->aBaseX(), pawn->aStrafe(), pawn->aForward(), (int)pawn->bFire());
+		fprintf(stderr, "[Net] PAWNINPUT aBaseY=%.1f aBaseX=%.1f aStrafe=%.1f aForward=%.1f bFire=%d bAltFire=%d\n", pawn->aBaseY(), pawn->aBaseX(), pawn->aStrafe(), pawn->aForward(), (int)pawn->bFire(), (int)pawn->bAltFire());
+		if (UWeapon* weaponObj = pawn->Weapon())
+			fprintf(stderr, "[Net] PAWNWEAPON %s state=%s role=%d\n", weaponObj->Class->Name.ToString().c_str(), weaponObj->GetStateName().ToString().c_str(), (int)weaponObj->Role());
 	}
 
 	// Resend reliable bunches the server hasn't acked yet: same ChSequence, fresh PacketId.
