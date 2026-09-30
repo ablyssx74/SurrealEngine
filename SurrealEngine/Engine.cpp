@@ -1588,6 +1588,13 @@ void Engine::LoadKeybindings()
 				{
 					std::string aliasCommand = alias.substr(commandStart.size(), pos - commandStart.size());
 					std::string aliasName = alias.substr(pos + commandSplit.size(), pos2 - pos - commandSplit.size());
+
+					// UT v469 writes the alias name quoted (Alias="MoveForward"), older versions don't
+					// (Alias=MoveForward). Keep the quotes and no binding that refers to the alias by name
+					// would ever match, so movement, strafing and look all silently did nothing.
+					if (aliasName.size() >= 2 && aliasName.front() == '"' && aliasName.back() == '"')
+						aliasName = aliasName.substr(1, aliasName.size() - 2);
+
 					if (!aliasName.empty() && aliasName != "None")
 						inputAliases[aliasName] = aliasCommand;
 				}
