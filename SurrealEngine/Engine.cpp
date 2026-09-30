@@ -589,6 +589,17 @@ void Engine::ClientTravel(const std::string& newURL, ETravelType travelType, boo
 {
 	UnrealURL url(newURL);
 
+	// On a network client the server decides which level we are in. A travel request without a host (the
+	// server switching maps) means "reconnect to this same server": the network layer does that and the
+	// server's next WELCOME loads the new level. (GameInfo doesn't exist on a client, so the normal
+	// relative-travel path below would also dereference null.) A URL with a host is a different server and
+	// takes the normal path, which reconnects there.
+	if (remoteConnection.IsConnected() && url.Host.empty())
+	{
+		remoteConnection.RequestLevelChange(newURL);
+		return;
+	}
+
 	// If the URL doesn't contain the player info, add them here.
 	// As they have to persist somehow
 	for (std::string optionKey : { "Name", "Class", "team", "skin", "Face", "Voice", "OverrideClass" })

@@ -111,6 +111,11 @@ public:
 	// can't be detected this way (UDP has no connection handshake at the OS level), only via
 	// whatever Tick() observes afterward.
 	bool Connect(const std::string& host, int port);
+
+	// The server told us to travel to another level (a ClientTravel RPC, sent when it switches maps).
+	// Reconnects to the same server - a new socket, so the server sees a new connection - and the new
+	// WELCOME then loads the new level. Deferred to the next Tick(): this is called from inside script.
+	void RequestLevelChange(const std::string& url);
 	void Disconnect();
 	bool IsConnected() const { return handle != remote_invalid_socket_value; }
 
@@ -134,6 +139,15 @@ public:
 
 private:
 	std::string statusLine;
+
+	// Forgets everything about the current session (login progress, channels, sequences, package map,
+	// downloads) so Connect() can start a new one on the same object.
+	void ResetSession();
+	bool levelChangeRequested = false;
+	bool gaveUp = false; // the server never answered; stop retrying until the next Connect()
+	double lastHelloAt = 0; // netClock when HELLO was last sent, for retransmits
+	int helloAttempts = 0;
+	double lastPacketAt = 0; // netClock when a packet last arrived from the server
 
 	remote_socket_t handle = remote_invalid_socket_value;
 	std::string remoteHost;

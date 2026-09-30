@@ -611,9 +611,42 @@ RemoteConnection::~RemoteConnection()
 	Disconnect();
 }
 
+void RemoteConnection::ResetSession()
+{
+	sentLoginReply = false;
+	sentJoin = false;
+	loadedNetworkMap = false;
+	pendingNetworkMapLevel.clear();
+	networkMapRetryCooldown = 0.0f;
+	possessedOwnPawn = false;
+	nextOutgoingPacketId = 2; // 0 is HELLO, 1 is NETSPEED+LOGIN
+	nextChannelIndex = 1;
+	knownChannelIndices.clear();
+	nextChSequenceByChannel.clear();
+	pendingDownloads.clear();
+	activeDownloads.clear();
+	packageMapList.clear();
+	activeActorChannels.clear();
+	actorChannelsByActor.clear();
+	pendingReliable.clear();
+	levelChangeRequested = false;
+	gaveUp = false;
+	helloAttempts = 0;
+}
+
+void RemoteConnection::RequestLevelChange(const std::string& url)
+{
+	if (handle == remote_invalid_socket_value)
+		return;
+	if (DebugNet())
+		fprintf(stderr, "[Net] RemoteConnection: server requested a level change (%s) - reconnecting\n", url.c_str());
+	levelChangeRequested = true;
+}
+
 bool RemoteConnection::Connect(const std::string& host, int port)
 {
 	Disconnect();
+	ResetSession();
 
 	handle = socket(AF_INET, SOCK_DGRAM, 0);
 	if (handle == remote_invalid_socket_value)
@@ -678,6 +711,10 @@ bool RemoteConnection::Connect(const std::string& host, int port)
 	// HELLO consumed the control channel's ChSequence 1; the CHALLENGE handler below hardcodes
 	// NETSPEED+LOGIN as ChSequence 2, so channel 0's next free sequence is 3.
 	nextChSequenceByChannel[0] = 3;
+
+	lastHelloAt = netClock;
+	lastPacketAt = netClock;
+	helloAttempts = 1;
 
 	return true;
 }
@@ -1820,6 +1857,57 @@ void RemoteConnection::Tick(float elapsed)
 
 	netClock += elapsed;
 
+	if (levelChangeRequested)
+	{
+		const std::string host = remoteHost;
+		const int port = remotePort;
+		statusLine = "Changing level...";
+		Connect(host, port); // resets the session and sends a fresh HELLO on a new socket
+		return;
+	}
+
+	// The server may not be listening yet (it is busy loading the next map) or the first packet may have
+	// been lost: keep sending HELLO until it answers with a CHALLENGE, for about half a minute.
+	if (!sentLoginReply && !gaveUp)
+	{
+		if (netClock - lastHelloAt >= 1.0)
+		{
+			if (helloAttempts >= 30)
+			{
+				gaveUp = true;
+				statusLine = "Could not reach " + remoteHost + ":" + std::to_string(remotePort);
+				if (DebugNet())
+					fprintf(stderr, "[Net] RemoteConnection: no answer from the server after %d HELLO attempts - giving up\n", helloAttempts);
+			}
+			else
+			{
+				std::vector<uint8_t> helloPacket = BuildHelloPacket();
+				send(handle, (const char*)helloPacket.data(), (int)helloPacket.size(), 0);
+				lastHelloAt = netClock;
+				helloAttempts++;
+				if (DebugNet())
+					fprintf(stderr, "[Net] RemoteConnection: resent HELLO (attempt %d)\n", helloAttempts);
+			}
+		}
+	}
+
+	// SE_DEBUG_NET_RECONNECT_AFTER=<seconds>: force one level-change reconnect, to exercise that path
+	// without waiting for the server to switch maps.
+	static double forceReconnectAt = getenv("SE_DEBUG_NET_RECONNECT_AFTER") ? atof(getenv("SE_DEBUG_NET_RECONNECT_AFTER")) : 0.0;
+	if (forceReconnectAt > 0.0 && loadedNetworkMap && netClock >= forceReconnectAt)
+	{
+		forceReconnectAt = 0.0;
+		RequestLevelChange("forced by SE_DEBUG_NET_RECONNECT_AFTER");
+	}
+
+	// A connected game that goes silent has lost its server (e.g. it restarted): try to get back in.
+	if (loadedNetworkMap && netClock - lastPacketAt > 20.0)
+	{
+		if (DebugNet())
+			fprintf(stderr, "[Net] RemoteConnection: nothing from the server for 20 seconds - reconnecting\n");
+		levelChangeRequested = true;
+	}
+
 	// SE_DEBUG_NET: what state is our own pawn in? (why is it, or isn't it, walking)
 	static double nextPawnReport = 0;
 	if (DebugNet() && possessedOwnPawn && netClock >= nextPawnReport && engine && engine->viewport && engine->viewport->Actor())
@@ -1884,6 +1972,7 @@ void RemoteConnection::Tick(float elapsed)
 					received, remoteHost.c_str(), remotePort, hex.c_str(), received > shown ? "..." : "");
 			}
 
+			lastPacketAt = netClock;
 			ParsedPacket packet = ParsePacket((const uint8_t*)buffer, received);
 			if (!packet.valid)
 			{
