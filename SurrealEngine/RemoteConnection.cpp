@@ -53,6 +53,9 @@
 // This is what lets actor-channel property decoding detect "no more replicated fields in this
 // bunch" the same way the real engine does - confirmed from source this session that the writer
 // never sends an explicit terminator; the reader just runs out of bits mid-ReadInt.
+// One shared origin for the wall-clock times in SE_NET_LOG_MOVES output (moves and corrections must be comparable).
+static const auto g_netWallStart = std::chrono::steady_clock::now();
+
 class BitReader
 {
 public:
@@ -1591,6 +1594,16 @@ bool RemoteConnection::TrySendRPC(UObject* instance, UFunction* function, const 
 		}
 	}
 
+	if (functionName.compare(0, 10, "ServerMove") == 0 && getenv("SE_NET_LOG_MOVES") && args.size() >= 3 &&
+		args[1].GetType() == ExpressionValueType::ValueVector && args[2].GetType() == ExpressionValueType::ValueVector)
+	{
+		// SE_NET_LOG_MOVES=1: one line per move sent - game timestamp, wall clock, acceleration and our own position.
+		double moveWall = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_netWallStart).count();
+		const vec3& acc = args[1].ToVector();
+		const vec3& loc = args[2].ToVector();
+		fprintf(stderr, "[MV] ts=%.4f wall=%.4f acc=(%.0f,%.0f,%.0f) loc=(%.1f,%.1f,%.1f)\n", args[0].ToFloat(), moveWall, acc.x, acc.y, acc.z, loc.x, loc.y, loc.z);
+	}
+
 	const int chIndex = channelIt->second;
 	const bool reliable = AnyFlags(function->FuncFlags, FunctionFlags::NetReliable);
 	const int chSequence = reliable ? AllocateChSequence(chIndex) : 0;
@@ -1890,6 +1903,13 @@ void RemoteConnection::HandleActorBunch(const uint8_t* packetData, int packetSiz
 				break;
 			}
 
+			if (function->Name == "ClientAdjustPosition" && getenv("SE_NET_LOG_MOVES") && callArgs.size() >= 9)
+			{
+				double adjWall = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_netWallStart).count();
+				fprintf(stderr, "[ADJ] ts=%.4f wall=%.4f server=(%.1f,%.1f,%.1f) vel=(%.0f,%.0f,%.0f) clientNow=(%.1f,%.1f,%.1f)\n", callArgs[0].ToFloat(), adjWall,
+					callArgs[3].ToFloat(), callArgs[4].ToFloat(), callArgs[5].ToFloat(), callArgs[6].ToFloat(), callArgs[7].ToFloat(), callArgs[8].ToFloat(),
+					actor->Location().x, actor->Location().y, actor->Location().z);
+			}
 			if (AnyFlags(function->FuncFlags, FunctionFlags::Net))
 			{
 				if (DebugNet())
