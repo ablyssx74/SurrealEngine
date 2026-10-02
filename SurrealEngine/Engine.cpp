@@ -589,6 +589,17 @@ void Engine::ClientTravel(const std::string& newURL, ETravelType travelType, boo
 {
 	UnrealURL url(newURL);
 
+	// On a network client the server decides which level we are in. A travel request without a host (the
+	// server switching maps) means "reconnect to this same server": the network layer does that and the
+	// server's next WELCOME loads the new level. (GameInfo doesn't exist on a client, so the normal
+	// relative-travel path below would also dereference null.) A URL with a host is a different server and
+	// takes the normal path, which reconnects there.
+	if (remoteConnection.IsConnected() && url.Host.empty())
+	{
+		remoteConnection.RequestLevelChange(newURL);
+		return;
+	}
+
 	// If the URL doesn't contain the player info, add them here.
 	// As they have to persist somehow
 	for (std::string optionKey : { "Name", "Class", "team", "skin", "Face", "Voice", "OverrideClass" })
@@ -754,6 +765,15 @@ void Engine::LoadMap(const UnrealURL& url, const std::map<std::string, std::stri
 		for (UActor* actor : Level->Actors)
 			if (actor)
 				actor->Destroy();
+
+		// What's left is the level's static actors (movers, triggers, ...) - the ones the server
+		// replicates by reference. On this client they are the server's proxies: swap Role and
+		// RemoteRole, as the real engine does, so they run as simulated proxies instead of as
+		// authority. Actors with RemoteRole None have no counterpart on the server and keep running
+		// on their own (torches, decorations, ...).
+		for (UActor* actor : Level->Actors)
+			if (actor && !actor->bDeleteMe() && actor->RemoteRole() != ROLE_None)
+				std::swap(actor->Role(), actor->RemoteRole());
 	}
 
 	// Find the game info class and spawn it - server-only; GameInfo stays null for a network client.
@@ -1588,6 +1608,13 @@ void Engine::LoadKeybindings()
 				{
 					std::string aliasCommand = alias.substr(commandStart.size(), pos - commandStart.size());
 					std::string aliasName = alias.substr(pos + commandSplit.size(), pos2 - pos - commandSplit.size());
+
+					// UT v469 writes the alias name quoted (Alias="MoveForward"), older versions don't
+					// (Alias=MoveForward). Keep the quotes and no binding that refers to the alias by name
+					// would ever match, so movement, strafing and look all silently did nothing.
+					if (aliasName.size() >= 2 && aliasName.front() == '"' && aliasName.back() == '"')
+						aliasName = aliasName.substr(1, aliasName.size() - 2);
+
 					if (!aliasName.empty() && aliasName != "None")
 						inputAliases[aliasName] = aliasCommand;
 				}

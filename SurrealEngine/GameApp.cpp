@@ -27,11 +27,22 @@ int GameApp::main(Array<std::string> args)
 
 		if (commandline->HasArg("-h", "--help"))
 		{
-			std::cout << "SurrealEngine [--url=<mapname>] [--engineversion=X] [Path to game folder]\n";
+			std::cout << "SurrealEngine [--url=<mapname>] [--engineversion=X] [--autostart] [Path to game folder]\n";
 			return 0;
 		}
 
-		int selectedGameIndex = LauncherWindow::ExecModal();
+		int selectedGameIndex = -1;
+		if (commandline->HasArg("-a", "--autostart"))
+		{
+			// Skip the launcher and start the first game found (the folder given on the command line).
+			GameFolderSelection::UpdateList();
+			if (!GameFolderSelection::Games.empty())
+				selectedGameIndex = 0;
+		}
+		else
+		{
+			selectedGameIndex = LauncherWindow::ExecModal();
+		}
 		if (selectedGameIndex >= 0)
 		{
 			GameLaunchInfo info = GameFolderSelection::GetLaunchInfo(selectedGameIndex);

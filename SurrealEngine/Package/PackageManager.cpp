@@ -621,10 +621,17 @@ void PackageManager::RemoveSaveInfoPackage(const NameString& saveFolderName)
 
 std::shared_ptr<PackageStream> PackageManager::GetStream(Package* package)
 {
+	// A Package is identified here by pointer, and packages are garbage collected, so a freed
+	// Package's address can be reused by a new one (e.g. while another package is being constructed
+	// during startup). The pointer alone then matched a stale stream for a different file, and the
+	// new package read that file's bytes instead of its own ("Not an unreal package file"). Matching
+	// the file path as well makes a reused address harmless.
+	const std::string packagePath = package->GetPackageFilePath();
+
 	int numStreams = 0;
 	for (auto it = openStreams.begin(); it != openStreams.end(); ++it)
 	{
-		if ((*it).Pkg == package)
+		if ((*it).Pkg == package && (*it).Path == packagePath)
 		{
 			if (it != openStreams.begin())
 			{
@@ -639,7 +646,8 @@ std::shared_ptr<PackageStream> PackageManager::GetStream(Package* package)
 
 	OpenStream s;
 	s.Pkg = package;
-	s.Stream = std::make_shared<PackageStream>(package, File::open_existing(package->GetPackageFilePath()));
+	s.Path = packagePath;
+	s.Stream = std::make_shared<PackageStream>(package, File::open_existing(packagePath));
 	openStreams.push_front(s);
 
 	if (numStreams == 10)

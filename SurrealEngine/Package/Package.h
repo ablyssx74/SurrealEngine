@@ -83,6 +83,18 @@ public:
 		return (int)FileExportCount;
 	}
 
+	// Name-table counterpart of GetExportCountForGeneration(): the wire's flat name index space is a
+	// running sum of these (UPackageMap::Compute's NameBase), and - like exports - ReadTables()
+	// appends names for native classes that the server's copy of the package doesn't have.
+	int GetNameCountForGeneration(int remoteGeneration) const
+	{
+		int localGeneration = (int)Generations.size();
+		int actualRemoteGeneration = (remoteGeneration <= 0) ? localGeneration : remoteGeneration;
+		if (actualRemoteGeneration > 0 && actualRemoteGeneration <= localGeneration)
+			return (int)Generations[actualRemoteGeneration - 1].NameCount;
+		return (int)FileNameCount;
+	}
+
 	template<class T> Array<T*> GetAllObjects();
 
 private:
@@ -98,6 +110,7 @@ private:
 	std::string FileName;
 	std::string FileExtension;
 
+	uint32_t FileNameCount = 0; // name count as stored in the file header, before ReadTables() appends native class names
 	uint32_t FileExportCount = 0; // export count as stored in the file header, before ReadTables() appends native class stubs
 	int Version = 0;
 	int LicenseeMode = 0;
