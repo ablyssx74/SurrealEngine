@@ -596,8 +596,20 @@ void Engine::ClientTravel(const std::string& newURL, ETravelType travelType, boo
 	// takes the normal path, which reconnects there.
 	if (remoteConnection.IsConnected() && url.Host.empty())
 	{
-		remoteConnection.RequestLevelChange(newURL);
-		return;
+		if (getenv("SE_DEBUG_NET"))
+			fprintf(stderr, "[Net] ClientTravel(\"%s\", type=%d) while connected\n", newURL.c_str(), (int)travelType);
+
+		// An absolute travel to a map is the player starting a local game from the menu: leave the server
+		// and load it. Anything else is the server moving everybody to its next level.
+		if (travelType == ETravelType::TRAVEL_Absolute && !url.Map.empty())
+		{
+			remoteConnection.LeaveServer();
+		}
+		else
+		{
+			remoteConnection.RequestLevelChange(newURL);
+			return;
+		}
 	}
 
 	// If the URL doesn't contain the player info, add them here.
@@ -1013,7 +1025,8 @@ std::map<std::string, std::string> Engine::CreateTravelInfo(bool transferItems)
 		UPlayerPawn* pawn = UObject::TryCast<UPlayerPawn>(actor);
 		if (pawn && pawn->Player())
 		{
-			std::string playerName = engine->LaunchInfo.ue1Version > 219 ? pawn->PlayerReplicationInfo()->PlayerName() : std::string("Player"); // To do: how to get the travel player name?
+			// A pawn that came from a server (we just left it for a local game) may have no replication info.
+			std::string playerName = engine->LaunchInfo.ue1Version > 219 && pawn->PlayerReplicationInfo() ? pawn->PlayerReplicationInfo()->PlayerName() : std::string("Player"); // To do: how to get the travel player name?
 			travelInfo[playerName] = ActorTravelInfo::Create(pawn, transferItems);
 		}
 	}

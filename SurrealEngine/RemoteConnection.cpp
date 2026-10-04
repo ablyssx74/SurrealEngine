@@ -28,6 +28,8 @@
 #include "Packages/Core/UFunction.h"
 #include "Packages/Engine/Actors/UActor.h"
 #include "Packages/Engine/Actors/Pawn/UPlayerPawn.h"
+#include "Packages/Engine/Actors/Brush/UMover.h"
+#include "Packages/Engine/Actors/UHUD.h"
 #include "Packages/Engine/Actors/Info/ULevelInfo.h"
 #include "Packages/Engine/Resources/Level/ULevel.h"
 #include "Math/rotator.h"
@@ -633,6 +635,8 @@ void RemoteConnection::ResetSession()
 	activeDownloads.clear();
 	packageMapList.clear();
 	activeActorChannels.clear();
+	spawnedActorChannels.clear();
+	nameIndexCache.clear();
 	actorChannelsByActor.clear();
 	pendingReliable.clear();
 	levelChangeRequested = false;
@@ -984,6 +988,29 @@ bool RemoteConnection::PackageMapIndexToName(int flatIndex, std::string& outName
 		flatIndex -= entry.nameCount;
 	}
 	return false;
+}
+
+// The reverse of PackageMapIndexToName, for sending a Name to the server. A name can sit in several packages' name
+// tables; any index holding that text means the same name to the server, so the first one will do.
+bool RemoteConnection::NameToPackageMapIndex(const std::string& name, int& outIndex)
+{
+	auto lower = [](std::string s) { for (char& ch : s) ch = (char)std::tolower((unsigned char)ch); return s; };
+	if (nameIndexCache.empty())
+	{
+		int flat = 0;
+		for (const RemotePackageMapEntry& entry : packageMapList)
+		{
+			if (!entry.package)
+				return false;
+			for (int i = 0; i < entry.nameCount; i++, flat++)
+				nameIndexCache.emplace(lower(entry.package->GetName(i).ToString()), flat);
+		}
+	}
+	auto it = nameIndexCache.find(lower(name));
+	if (it == nameIndexCache.end())
+		return false;
+	outIndex = it->second;
+	return true;
 }
 
 // Reimplements UPackageMap::IndexToObject (UnCoreNet.cpp): walk the package list in order,
@@ -1446,6 +1473,7 @@ bool RemoteConnection::TrySendRPC(UObject* instance, UFunction* function, const 
 		case ExpressionValueType::ValueVector: { const vec3& x = v.ToVector(); return x.x == 0.0f && x.y == 0.0f && x.z == 0.0f; }
 		case ExpressionValueType::ValueRotator: { const Rotator& r = v.ToRotator(); return r.Pitch == 0 && r.Yaw == 0 && r.Roll == 0; }
 		case ExpressionValueType::ValueString: return v.ToString().empty();
+		case ExpressionValueType::ValueName: return v.ToName().IsNone();
 		case ExpressionValueType::ValueColor: { const Color& k = v.ToColor(); return k.R == 0 && k.G == 0 && k.B == 0 && k.A == 0; }
 		default: return false;
 		}
@@ -1497,6 +1525,14 @@ bool RemoteConnection::TrySendRPC(UObject* instance, UFunction* function, const 
 				if (value != 0)
 					bw.WriteBits(value, axisBits);
 			}
+			return true;
+		}
+		case ExpressionValueType::ValueName:
+		{
+			int nameIndex = 0;
+			if (!NameToPackageMapIndex(v.ToName().ToString(), nameIndex))
+				return false;
+			bw.WriteInt((uint32_t)nameIndex, (uint32_t)PackageMapMaxNameIndex());
 			return true;
 		}
 		case ExpressionValueType::ValueString: bw.WriteString(v.ToString()); return true;
@@ -1740,6 +1776,8 @@ void RemoteConnection::HandleActorBunch(const uint8_t* packetData, int packetSiz
 
 		activeActorChannels[chIndex] = actor;
 		actorChannelsByActor[actor] = chIndex;
+		if (UObject::TryCast<UClass>(obj))
+			spawnedActorChannels.insert(chIndex);
 		firstBunchOfActor = true;
 		PossessIfOwnPawn(actor);
 	}
@@ -1819,6 +1857,7 @@ void RemoteConnection::HandleActorBunch(const uint8_t* packetData, int packetSiz
 		fprintf(stderr, "CAPBUNCH %d %s %d %d %d %s\n", chIndex, actor->Class->Name.ToString().c_str(), (int)bOpen, br.GetBitPos() - subBit, contentBits, capBits.c_str());
 	}
 
+	bool moverSimUpdate = false; // a Mover got a new SimInterpolate: its motion has (re)started on the server
 	int remainBeforeRep = br.RemainingBits(); // end-of-bunch alignment check: a correctly decoded bunch leaves 0 bits when the final index read fails
 	std::string lastFieldName;
 	uint32_t repIndex = br.ReadInt((uint32_t)classCache->GetMaxIndex());
@@ -1858,6 +1897,13 @@ void RemoteConnection::HandleActorBunch(const uint8_t* packetData, int packetSiz
 				if (DebugNet())
 					fprintf(stderr, "[Net] RemoteConnection: actor channel %d: unsupported property type for \"%s\" - abandoning rest of this bunch\n", chIndex, prop->Name.ToString().c_str());
 				break;
+			}
+			if (prop->Name == "SimInterpolate")
+				moverSimUpdate = true;
+			if (DebugNet() && (prop->Name == "DrawScale" || prop->Name == "Mesh" || prop->Name == "bHidden" || prop->Name == "bCanClientFire" || prop->Name == "Affector") && UObject::TryCast<UWeapon>(actor))
+			{
+				std::string v = prop->Name == "bCanClientFire" ? std::to_string((int)actor->GetBool("bCanClientFire")) : prop->Name == "Affector" ? std::string("(object)") : prop->Name == "DrawScale" ? std::to_string(*(float*)elementPtr) : prop->Name == "Mesh" ? (*(UObject**)elementPtr ? (*(UObject**)elementPtr)->Name.ToString() : std::string("None")) : std::to_string((int)actor->bHidden());
+				fprintf(stderr, "[Net] WEAPONPROP %s ch=%d %s = %s (first bunch %d)\n", actor->Class->Name.ToString().c_str(), chIndex, prop->Name.ToString().c_str(), v.c_str(), (int)firstBunchOfActor);
 			}
 		}
 		else
@@ -1914,9 +1960,16 @@ void RemoteConnection::HandleActorBunch(const uint8_t* packetData, int packetSiz
 			{
 				if (DebugNet())
 					fprintf(stderr, "[Net] RemoteConnection: RPC %s on channel %d (%s)\n", function->Name.ToString().c_str(), chIndex, actor->Class->Name.ToString().c_str());
+				// The server calls RealWeapon(W, n) right after it sets the weapon's bCanClientFire (the weapon's select
+				// animation has finished), and replicates that flag to its owner. That update never reaches us, so a
+				// weapon would sit forever unable to fire on the client: apply what the server just did.
+				UWeapon* readiedWeapon = (function->Name == "RealWeapon" && !callArgs.empty() && callArgs[0].GetType() == ExpressionValueType::ValueObject)
+					? UObject::TryCast<UWeapon>(callArgs[0].ToObject()) : nullptr;
 				try
 				{
 					Frame::Call(function, actor, std::move(callArgs));
+					if (readiedWeapon && UObject::TryCast<UPlayerPawn>(actor) && actor == (UActor*)(engine && engine->viewport ? engine->viewport->Actor() : nullptr))
+						readiedWeapon->SetBool("bCanClientFire", true);
 				}
 				catch (const std::exception& e)
 				{
@@ -1957,7 +2010,9 @@ void RemoteConnection::HandleActorBunch(const uint8_t* packetData, int packetSiz
 				{
 					if (DebugNet())
 						fprintf(stderr, "[Net] RemoteConnection: calling SetHand(%.1f) on our new %s\n", ownPawn->Handedness(), weapon->Class->Name.ToString().c_str());
-					CallEvent(weapon, NameString("SetHand"), { ExpressionValue::FloatValue(ownPawn->Handedness()) });
+					// Called directly rather than as an event: SetHand isn't "simulated", which CallEvent would skip on a replica.
+					if (UFunction* setHand = FindEventFunction(weapon, NameString("SetHand")))
+						Frame::Call(setHand, weapon, { ExpressionValue::FloatValue(ownPawn->Handedness()) });
 				}
 			}
 		}
@@ -1968,10 +2023,45 @@ void RemoteConnection::HandleActorBunch(const uint8_t* packetData, int packetSiz
 		}
 	}
 
+	// The native half of Mover replication (AMover::PostNetReceive in the original engine): the server sends where
+	// a door started from and how far along its move it is; the client resumes that move locally.
+	if (moverSimUpdate)
+	{
+		if (UMover* mover = UObject::TryCast<UMover>(actor))
+		{
+			mover->OldPos() = mover->SimOldPos();
+			mover->OldRot() = Rotator(mover->SimOldRotPitch(), mover->SimOldRotYaw(), mover->SimOldRotRoll());
+			mover->PhysAlpha() = mover->SimInterpolate().x * 0.01f;
+			mover->PhysRate() = mover->SimInterpolate().y * 0.01f;
+			int packed = (int)mover->SimInterpolate().z;
+			mover->PrevKeyNum() = (uint8_t)(packed / 256);
+			mover->KeyNum() = (uint8_t)(packed % 256);
+			mover->bInterpolating() = true;
+			mover->SetPhysics(PHYS_MovingBrush);
+		}
+	}
+
 	if (bClose)
 	{
 		activeActorChannels.erase(chIndex);
 		actorChannelsByActor.erase(actor);
+
+		// The server destroyed this actor (a projectile that hit something, an effect that ran its course) or lost
+		// interest in it: a copy the client spawned for the channel goes away with it. Level actors stay.
+		if (spawnedActorChannels.erase(chIndex) && actor && !actor->bDeleteMe() && actor != (UActor*)(engine && engine->viewport ? engine->viewport->Actor() : nullptr))
+		{
+			try
+			{
+				if (DebugNet())
+					fprintf(stderr, "[Net] RemoteConnection: channel %d closed - destroying %s %s at (%.0f,%.0f,%.0f)\n", chIndex, actor->Class->Name.ToString().c_str(), actor->Name.ToString().c_str(), actor->Location().x, actor->Location().y, actor->Location().z);
+				actor->Destroy();
+			}
+			catch (const std::exception& e)
+			{
+				if (DebugNet())
+					fprintf(stderr, "[Net] RemoteConnection: destroying closed actor %s failed: %s\n", actor->Name.ToString().c_str(), e.what());
+			}
+		}
 	}
 }
 
@@ -2043,6 +2133,12 @@ void RemoteConnection::Tick(float elapsed)
 			pawn->Name.ToString().c_str(), pawn->GetStateName().ToString().c_str(), (int)pawn->Physics(), (int)pawn->Role(), (int)pawn->RemoteRole(),
 			pawn->Location().x, pawn->Location().y, pawn->Location().z, pawn->Velocity().x, pawn->Velocity().y, pawn->Velocity().z,
 			pawn->Acceleration().x, pawn->Acceleration().y, pawn->Acceleration().z);
+		{ std::string d; try { d = pawn->Class->GetPropertyAsString("HUDType"); } catch (...) { d = "?"; }
+		fprintf(stderr, "[Net] PAWNHUD classdefault HUDType=%s ScoringType=%s\n", d.c_str(), pawn->ScoringType() ? pawn->ScoringType()->Name.ToString().c_str() : "(none)"); }
+		fprintf(stderr, "[Net] PAWNSPEED GroundSpeed=%.1f AccelRate=%.1f AirSpeed=%.1f WaterSpeed=%.1f AirControl=%.2f JumpZ=%.1f bIsWalking=%d Physics=%d\n", pawn->GetFloat("GroundSpeed"), pawn->GetFloat("AccelRate"),
+			pawn->GetFloat("AirSpeed"), pawn->GetFloat("WaterSpeed"), pawn->GetFloat("AirControl"), pawn->GetFloat("JumpZ"), (int)pawn->GetBool("bIsWalking"), (int)pawn->Physics());
+		fprintf(stderr, "[Net] PAWNHUD HUDType=%s myHUD=%s Player=%s\n", pawn->HUDType() ? pawn->HUDType()->Name.ToString().c_str() : "(none)",
+			pawn->myHUD() ? pawn->myHUD()->Name.ToString().c_str() : "(none)", pawn->Player() ? "set" : "(none)");
 		{
 			PointRegion& region = pawn->Region();
 			fprintf(stderr, "[Net] PAWNZONE zone=%s zoneNumber=%d bWaterZone=%d ZoneGravity=(%.0f,%.0f,%.0f) headZone=%s\n",
@@ -2067,6 +2163,15 @@ void RemoteConnection::Tick(float elapsed)
 			fprintf(stderr, "[Net] PAWNVIEW FOVAngle=%.1f DefaultFOV=%.1f DesiredFOV=%.1f weapon DrawScale=%.2f PlayerViewScale=%.2f Mesh=%s PlayerViewMesh=%s\n", pawn->GetFloat("FOVAngle"), pawn->GetFloat("DefaultFOV"), pawn->GetFloat("DesiredFOV"),
 				weaponObj->GetFloat("DrawScale"), weaponObj->GetFloat("PlayerViewScale"),
 				weaponObj->GetUObject("Mesh") ? weaponObj->GetUObject("Mesh")->Name.ToString().c_str() : "-", weaponObj->GetUObject("PlayerViewMesh") ? weaponObj->GetUObject("PlayerViewMesh")->Name.ToString().c_str() : "-");
+			{
+				UObject* ammo = weaponObj->GetUObject("AmmoType");
+				fprintf(stderr, "[Net] PAWNFIRE bCanClientFire=%d bForceFire=%d bForceAltFire=%d AmmoType=%s AmmoAmount=%d bFire=%d bAltFire=%d weaponOwner=%s\n",
+					(int)weaponObj->GetBool("bCanClientFire"), (int)weaponObj->GetBool("bForceFire"), (int)weaponObj->GetBool("bForceAltFire"), ammo ? ammo->Name.ToString().c_str() : "(none)",
+					ammo ? ammo->GetInt("AmmoAmount") : -1, (int)pawn->bFire(), (int)pawn->bAltFire(), weaponObj->Owner() ? weaponObj->Owner()->Name.ToString().c_str() : "(none)");
+			}
+			fprintf(stderr, "[Net] PAWNVIEW2 class defaults: DrawScale=%.2f PickupViewScale=%.2f PlayerViewScale=%.2f DrawType=%d bHidden=%d bOnlyOwnerSee=%d bCarriedItem=%d\n",
+				weaponObj->Class->GetDefaultObject<UActor>()->GetFloat("DrawScale"), weaponObj->GetFloat("PickupViewScale"), weaponObj->Class->GetDefaultObject<UActor>()->GetFloat("PlayerViewScale"),
+				(int)weaponObj->GetByte("DrawType"), (int)weaponObj->GetBool("bHidden"), (int)weaponObj->GetBool("bOnlyOwnerSee"), (int)weaponObj->GetBool("bCarriedItem"));
 		}
 	}
 

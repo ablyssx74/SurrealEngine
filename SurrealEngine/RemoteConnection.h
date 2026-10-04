@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <unordered_map>
 #include <set>
 #include <cstdint>
 
@@ -117,6 +118,7 @@ public:
 	// WELCOME then loads the new level. Deferred to the next Tick(): this is called from inside script.
 	void RequestLevelChange(const std::string& url);
 	void Disconnect();
+	void LeaveServer() { Disconnect(); ResetSession(); } // drop the connection for good (the player chose a local game)
 	bool IsConnected() const { return handle != remote_invalid_socket_value; }
 
 	// Polls for incoming data and logs whatever arrives (or whatever error the OS reports, e.g.
@@ -171,6 +173,7 @@ private:
 	std::map<int, RemoteFileDownload> activeDownloads; // chIndex -> download in progress on that channel
 	std::vector<RemotePackageMapEntry> packageMapList; // every USES package, in arrival order
 	std::map<int, UActor*> activeActorChannels; // chIndex -> actor, for channels currently open
+	std::set<int> spawnedActorChannels; // channels whose actor we spawned from the server's class reference (as opposed to a level actor): closing one destroys it
 	std::map<UActor*, int> actorChannelsByActor; // reverse lookup - which channel a dynamic actor is on
 
 	int AllocateChSequence(int chIndex);
@@ -196,6 +199,8 @@ private:
 	UObject* PackageMapIndexToObject(int flatIndex) const;
 	int PackageMapMaxNameIndex() const;
 	bool PackageMapIndexToName(int flatIndex, std::string& outName) const;
+	bool NameToPackageMapIndex(const std::string& name, int& outIndex);
+	std::unordered_map<std::string, int> nameIndexCache; // lower-cased name -> first flat name index, built on first use
 
 	void TryLoadNetworkMap(const std::string& levelName);
 	// packetData/packetSize is the full received packet a bunch's content offset is relative to
