@@ -8,6 +8,35 @@ GLTextureManager::GLTextureManager(GLRenderDevice* renderer) : renderer(renderer
 {
 }
 
+#ifdef __HAIKU__
+// Average color of a P8 texture's source data (palette indices run through the palette),
+// used to approximate its real appearance when sampling it directly renders black - see
+// GLRenderDevice::DrawComplexSurfaceFaces().
+static void ComputeAverageColor(const TextureInfo& info, GLCachedTexture* tex)
+{
+	if (info.Format != TextureFormat::P8 || !info.Palette || info.NumMips <= 0 || !info.Mips || info.Mips[0].Data.empty())
+		return;
+
+	const UnrealMipmap& mip = info.Mips[0];
+	const TextureColor* palette = info.Palette;
+	size_t texelN = (size_t)mip.Width * mip.Height;
+	if (texelN == 0)
+		return;
+
+	uint64_t sumR = 0, sumG = 0, sumB = 0;
+	for (size_t i = 0; i < texelN && i < mip.Data.size(); i++)
+	{
+		const TextureColor& c = palette[mip.Data[i]];
+		sumR += c.R;
+		sumG += c.G;
+		sumB += c.B;
+	}
+	tex->AverageColorR = (float)sumR / texelN / 255.0f;
+	tex->AverageColorG = (float)sumG / texelN / 255.0f;
+	tex->AverageColorB = (float)sumB / texelN / 255.0f;
+}
+#endif
+
 GLTextureManager::~GLTextureManager()
 {
 	ClearCache();
@@ -53,6 +82,9 @@ GLCachedTexture* GLTextureManager::GetTexture(TextureInfo* info, bool masked)
 		tex = tex2.get();
 
 		renderer->Uploads->UploadTexture(tex, *info, masked);
+#ifdef __HAIKU__
+		ComputeAverageColor(*info, tex);
+#endif
 	}
 	else
 	{

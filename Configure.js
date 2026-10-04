@@ -357,6 +357,8 @@ var commonSources = [
 	"SurrealEngine/ObjectTravelInfo.h",
 	"SurrealEngine/UnrealURL.cpp",
 	"SurrealEngine/UnrealURL.h",
+	"SurrealEngine/RemoteConnection.cpp",
+	"SurrealEngine/RemoteConnection.h",
 	"SurrealEngine/Packages/ConSys/UConAudioList.cpp",
 	"SurrealEngine/Packages/ConSys/UConAudioList.h",
 	"SurrealEngine/Packages/ConSys/UConCamera.h",

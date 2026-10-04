@@ -4,6 +4,7 @@
 #include "Engine.h"
 #include "Package/PackageManager.h"
 #include "Utils/StrTools.h"
+#include <cstdlib>
 
 UnrealURL::UnrealURL(const UnrealURL& baseURL, const UnrealURL& nextURL)
 {
@@ -38,6 +39,37 @@ UnrealURL::UnrealURL(std::string urlString)
 	// Due to the exit teleporter pointing to " trench" (with the whitespace at the beginning)
 	urlString.erase(urlString.find_last_not_of(' ') + 1);
 	urlString.erase(0, urlString.find_first_not_of(' '));
+
+	// Bug: this never parsed a "protocol://host[:port]" prefix at all - a real join URL like
+	// "unreal://45.59.162.13:7778?Name=ablyss?Class=..." (built by
+	// UBrowserServerGrid.JoinServer() when double-clicking a server in the browser) got treated
+	// as one giant bare map name up to the first '/', '?' or '#' it contained - which is the
+	// FIRST '/' of "unreal://" itself, so Map ended up as literally "unreal:" and the actual
+	// host/port got swallowed into Portal instead of ever reaching Host/Port. That's exactly why
+	// joining any server crashed with "Could not open .../Maps/unreal:.unr" - it tried to load a
+	// local map file literally named that instead of connecting anywhere.
+	size_t schemePos = urlString.find("://");
+	if (schemePos != std::string::npos)
+	{
+		Protocol = urlString.substr(0, schemePos);
+
+		std::string rest = urlString.substr(schemePos + 3);
+		size_t hostEndPos = StrTools::find_first_of_any(rest, "?/#");
+		std::string hostPort = rest.substr(0, hostEndPos);
+
+		size_t colonPos = hostPort.find(':');
+		if (colonPos != std::string::npos)
+		{
+			Host = hostPort.substr(0, colonPos);
+			Port = std::atoi(hostPort.substr(colonPos + 1).c_str());
+		}
+		else
+		{
+			Host = hostPort;
+		}
+
+		urlString = (hostEndPos != std::string::npos) ? rest.substr(hostEndPos) : std::string();
+	}
 
 	size_t mapNamePos = StrTools::find_first_of_any(urlString, "?/#");
 

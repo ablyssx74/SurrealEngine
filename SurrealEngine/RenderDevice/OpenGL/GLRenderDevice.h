@@ -241,6 +241,10 @@ private:
 		GLCachedTexture* detailtex;
 		GLCachedTexture* fogmap;
 		vec4* editorcolor;
+		// Multiplied into the base texture sample. On Haiku this carries the real texture's
+		// average color when tex has been substituted with nulltex - see DrawComplexSurface().
+		// Everywhere else this is just white (a no-op).
+		vec4 texcolor = vec4(1.0f);
 	};
 	void DrawComplexSurfaceFaces(const ComplexSurfaceInfo& info);
 

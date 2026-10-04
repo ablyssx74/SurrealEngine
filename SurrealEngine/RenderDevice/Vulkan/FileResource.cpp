@@ -57,7 +57,7 @@ std::string FileResource::readAllText(const std::string& filename)
 			layout(binding = 0) uniform sampler2D textures[];
 
 			layout(location = 0) flat in uint flags;
-			layout(location = 1) centroid in vec2 texCoord;
+			layout(location = 1) in vec2 texCoord;
 			layout(location = 2) in vec2 texCoord2;
 			layout(location = 3) in vec2 texCoord3;
 			layout(location = 4) in vec2 texCoord4;

@@ -12,6 +12,7 @@
 #include "Packages/Core/UClass.h"
 #include "Packages/Core/UEnum.h"
 #include <cmath>
+#include <cstdlib>
 
 #ifdef _MSC_VER
 #pragma warning(disable: 4244) // warning C4244: '/=': conversion from 'float' to 'int', possible loss of data
@@ -1447,6 +1448,15 @@ void NObject::RotRand(std::optional<bool> bRoll, Rotator& ReturnValue)
 
 void NObject::SaveConfig(UObject* Self)
 {
+	// Diagnostic: set SE_DEBUG_CONFIG=1 to see every Object.SaveConfig() call the VM makes and
+	// which object/class it's called on - pair with UClass::SaveProperties' own SE_DEBUG_CONFIG
+	// trace to see whether a settings change actually reaches this at all, and if so, whether
+	// the owning class is even flagged to save anything.
+	if (std::getenv("SE_DEBUG_CONFIG"))
+	{
+		fprintf(stderr, "[Config] Object.SaveConfig() called on %s (class %s)\n",
+			Self->Name.ToString().c_str(), Self->Class ? Self->Class->Name.ToString().c_str() : "<null>");
+	}
 	Self->SaveConfig();
 }
 

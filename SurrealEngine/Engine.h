@@ -8,6 +8,7 @@
 #include "GameWindow.h"
 #include "Packages/Engine/Actors/UActor.h"
 #include "UnrealURL.h"
+#include "RemoteConnection.h"
 #include "GameFolder.h"
 #include <set>
 #include <list>
@@ -74,12 +75,13 @@ public:
 	void ClientTravel(const std::string& URL, ETravelType travelType, bool transferItems);
 	UnrealURL GetDefaultURL(const std::string& map);
 	void LoadEntryMap();
-	void LoadMap(const UnrealURL& url, const std::map<std::string, std::string>& travelInfo = {});
+	void LoadMap(const UnrealURL& url, const std::map<std::string, std::string>& travelInfo = {}, bool isNetworkClient = false);
 	void LoadFromSaveFile(const UnrealURL& url);
 	void SaveGameToSlot(int32_t slotNum, const std::string& saveDescription) const;
 	void UnloadMap();
 	void LoginPlayer();
 	void PossessSavedPlayer();
+	void PossessNetworkActor(UPlayerPawn* pawn);
 
 	UObject* FindObject(NameString name, NameString className);
 
@@ -168,6 +170,9 @@ public:
 		bool TransferItems = false;
 	} ClientTravelInfo;
 
+	// See RemoteConnection.h for what real multiplayer join support this does and doesn't cover yet.
+	RemoteConnection remoteConnection;
+
 	struct
 	{
 		int32_t SaveGameSlot = DONT_SAVE_GAME;
@@ -224,6 +229,8 @@ public:
 	bool getDXWindowDebugMode() const { return m_DrawDebugDXWindowHierarchy; }
 
 private:
+	void ReassertCursorLock();
+
 	std::map<std::string, std::string> CreateTravelInfo(bool transferItems);
 
 	void LogGamePackageSHA1Sums() const;

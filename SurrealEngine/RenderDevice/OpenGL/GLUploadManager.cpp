@@ -4,6 +4,8 @@
 #include "GLRenderDevice.h"
 #include "GLCachedTexture.h"
 #include <cstdlib>
+#include <cctype>
+#include <string>
 
 GLUploadManager::GLUploadManager(GLRenderDevice* renderer) : renderer(renderer)
 {
@@ -11,6 +13,54 @@ GLUploadManager::GLUploadManager(GLRenderDevice* renderer) : renderer(renderer)
 
 GLUploadManager::~GLUploadManager()
 {
+}
+
+// Root-caused and confirmed on real hardware: any texture that ends up mipmap-complete with
+// more than one level reliably samples as solid black on Haiku, reproduced identically on both
+// Zink/NVK (hardware Vulkan translation) and Haiku's own stock Mesa/llvmpipe software
+// rasterizer - two unrelated renderer implementations agreeing rules out a driver-specific
+// quirk, so this is something about how multi-level textures get built here running into
+// completeness rules Haiku's Mesa builds enforce (GLSL texture completeness applies to the
+// *whole* declared mip chain, even for an explicit textureLod() call at level 0 - which is why
+// forcing LOD 0 never escaped this). Forcing every texture down to a single mip level sidesteps
+// it entirely and restores full texture detail; the only cost is losing mipmap-based
+// minification filtering (more shimmer/aliasing on distant/oblique surfaces), a clear win over
+// textures not rendering at all. Set SE_DISABLE_MIPMAP_WORKAROUND=1 to re-enable real mipmapping,
+// e.g. to re-test whether a future Mesa update fixed the underlying completeness bug.
+//
+// Confirmed via a Linux user report (SE_DEBUG_NO_MIPMAPS fixed an identical black-world-texture
+// symptom there) that this was never actually Haiku-specific - it was only ever found there
+// first. The original diagnosis above already named the two renderer families that reproduce
+// it: Zink (GL-over-Vulkan translation, used on Haiku but also common on Linux, e.g. as a
+// fallback or via NVK) and llvmpipe (Mesa's software rasterizer, likewise not OS-specific). So
+// detect those by GL_RENDERER at runtime instead of gating on the OS.
+static bool ShouldForceSingleMipLevel()
+{
+	static const bool disableWorkaround = std::getenv("SE_DISABLE_MIPMAP_WORKAROUND") != nullptr;
+	if (!disableWorkaround)
+	{
+#ifdef __HAIKU__
+		return true;
+#else
+		static const bool affectedRenderer = []()
+			{
+				const char* renderer = (const char*)glGetString(GL_RENDERER);
+				if (!renderer)
+					return false;
+				std::string s = renderer;
+				for (char& c : s)
+					c = (char)std::tolower((unsigned char)c);
+				return s.find("zink") != std::string::npos || s.find("llvmpipe") != std::string::npos;
+			}();
+		if (affectedRenderer)
+			return true;
+#endif
+	}
+
+	// Diagnostic escape hatch: set SE_DEBUG_NO_MIPMAPS=1 to force every texture to a single
+	// mip level, no matter how many levels its source data has, on any platform.
+	static const bool debugNoMipmaps = std::getenv("SE_DEBUG_NO_MIPMAPS") != nullptr;
+	return debugNoMipmaps;
 }
 
 bool GLUploadManager::SupportsTextureFormat(TextureFormat Format) const
@@ -24,13 +74,7 @@ void GLUploadManager::UploadTexture(GLCachedTexture* tex, const TextureInfo& Inf
 	int height = Info.VSize;
 	int mipcount = Info.NumMips;
 
-	// Diagnostic escape hatch: set SE_DEBUG_NO_MIPMAPS=1 to force every texture to a single
-	// mip level, no matter how many levels its source data has. All our sampler objects use
-	// mipmap-requiring min filters (*_MIPMAP_*), so an incomplete mip chain on some texture
-	// (only some levels actually written, e.g. because Mips[level].Data is empty) would make
-	// that texture sample as black on a strict/core-profile driver. This rules that out.
-	static const bool debugNoMipmaps = std::getenv("SE_DEBUG_NO_MIPMAPS") != nullptr;
-	if (debugNoMipmaps)
+	if (ShouldForceSingleMipLevel())
 		mipcount = 1;
 
 	GLTextureUploader* uploader = GLTextureUploader::GetUploader(Info.Format);
@@ -43,18 +87,7 @@ void GLUploadManager::UploadTexture(GLCachedTexture* tex, const TextureInfo& Inf
 		uploader = nullptr;
 	}
 
-	GLint internalFormat = GL_RGBA8;
-	GLenum format = GL_RGBA;
-	GLenum type = GL_UNSIGNED_BYTE;
-	if (uploader)
-	{
-		internalFormat = uploader->GetInternalformat();
-		if (uploader->GetFormat() != 0)
-		{
-			format = uploader->GetFormat();
-			type = uploader->GetType();
-		}
-	}
+	GLint internalFormat = uploader ? uploader->GetInternalformat() : GL_RGBA8;
 
 	// Base texture must use complete 4x4 compression blocks in Direct3D 11 or some drivers crash.
 	// It is unclear if some OpenGL drivers have the same problem or not.
@@ -85,22 +118,70 @@ void GLUploadManager::UploadTexture(GLCachedTexture* tex, const TextureInfo& Inf
 
 		tex->Texture = std::make_shared<GLTexture2D>();
 		glBindTexture(GL_TEXTURE_2D, tex->Texture->Handle);
-		int mipwidth = width;
-		int mipheight = height;
-		for (int miplevel = 0; miplevel < mipcount; miplevel++)
+		if (uploader && uploader->GetFormat() == 0)
 		{
-			glTexImage2D(GL_TEXTURE_2D, miplevel, internalFormat, mipwidth, mipheight, 0, format, type, nullptr);
+			// Compressed (BC) formats: UploadData() below respecifies each level's exact size
+			// via glCompressedTexImage2D from the real per-level source data (clamped to the
+			// 4x4 block minimum), which can legitimately land on different level dimensions
+			// than this loop's guess - glCompressedTexImage2D tolerates that by redefining the
+			// level outright. Immutable storage can't: glTexStorage2D fixes every level's exact
+			// size up front and glCompressedTexSubImage2D must fit within it exactly, so keep
+			// this path on the old mutable per-level glTexImage2D allocation.
+			int mipwidth = width;
+			int mipheight = height;
+			for (int miplevel = 0; miplevel < mipcount; miplevel++)
+			{
+				glTexImage2D(GL_TEXTURE_2D, miplevel, internalFormat, mipwidth, mipheight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+				ThrowIfGLError("UploadTexture failed");
+				mipwidth = std::max(mipwidth >> 1, 1);
+				mipheight = std::max(mipheight >> 1, 1);
+			}
+		}
+		else
+		{
+			// Immutable storage (one glTexStorage2D call, fixed level count/size/format up
+			// front) instead of the previous per-level glTexImage2D calls. Both are valid ways
+			// to allocate a GL texture, but a mutable texture built up via repeated glTexImage2D
+			// re-specification is a harder case for Zink to translate into a single Vulkan
+			// image - it may need to recreate the underlying image as levels get (re)specified.
+			// Immutable storage maps directly onto one fixed-size Vulkan image from the start.
+			glTexStorage2D(GL_TEXTURE_2D, std::max(mipcount, 1), internalFormat, width, height);
 			ThrowIfGLError("UploadTexture failed");
-			mipwidth = std::max(mipwidth >> 1, 1);
-			mipheight = std::max(mipheight >> 1, 1);
 		}
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, std::max(mipcount - 1, 0));
+
+		// Force an explicit identity swizzle rather than trusting the driver's default. Nothing
+		// in this codebase ever sets GL_TEXTURE_SWIZZLE_* - glGetTexImage retrieves the raw
+		// stored texel data, bypassing swizzle entirely, while texture()/textureLod() in a
+		// shader applies it as part of the fetch. A GPU readback of a real world texture has
+		// been proven to exactly match its source data, yet sampling that same texture in the
+		// scene shader (at any LOD, with zero texture-unit churn) still returns black - a
+		// mismatch that's consistent with a bad *default* swizzle state on this driver for
+		// textures created this way, which a readback would never reveal.
+		GLint identitySwizzle[4] = { GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA };
+		glTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_RGBA, identitySwizzle);
 	}
 
 	if (uploader)
 		UploadData(tex->Texture.get(), Info, masked, uploader, tex->DummyMipmapCount, minSize);
 	else
 		UploadWhite(tex->Texture.get());
+
+	// Diagnostic escape hatch: set SE_DEBUG_FINISH_AFTER_UPLOAD=1 to force a full GPU sync
+	// (glFinish) right after every texture upload completes. World surface textures are
+	// proven byte-correct via glGetTexImage readback immediately after upload, yet sampling
+	// that same texture from the scene shader in a later (batched/deferred) draw call still
+	// returns black - every state-based explanation (mips, shader interface, LOD, storage
+	// mode, swizzle, UV wrapping) has been ruled out with no effect. nulltex and most mesh
+	// textures are uploaded well before they're first sampled, giving the driver plenty of
+	// time to complete the transfer; a world surface's base texture may get uploaded and
+	// sampled in much tighter proximity within the same frame. This tests whether Zink/NVK is
+	// missing a write-before-read synchronization barrier between the texture upload (a
+	// transfer/copy operation under the hood) and the shader sampling it - forcing a full
+	// pipeline stall here would mask that class of bug and confirm it.
+	static const bool debugFinishAfterUpload = std::getenv("SE_DEBUG_FINISH_AFTER_UPLOAD") != nullptr;
+	if (debugFinishAfterUpload)
+		glFinish();
 
 	renderer->Stats.Uploads++;
 }
@@ -131,8 +212,20 @@ void GLUploadManager::UploadTextureRect(GLCachedTexture* tex, const TextureInfo&
 
 void GLUploadManager::UploadData(GLTexture2D* image, const TextureInfo& Info, bool masked, GLTextureUploader* uploader, int dummyMipmapCount, int minSize)
 {
-	static const bool debugNoMipmaps = std::getenv("SE_DEBUG_NO_MIPMAPS") != nullptr;
-	int numMips = debugNoMipmaps ? 1 : Info.NumMips;
+	int numMips = ShouldForceSingleMipLevel() ? 1 : Info.NumMips;
+
+	// UploadTexture() allocates storage (glTexImage2D) for every level up to its own mipcount
+	// and sets GL_TEXTURE_MAX_LEVEL to match, on the assumption every one of those levels gets
+	// written below. But some source textures have a shorter *populated* mip chain than
+	// Info.NumMips claims (Mip->Data.empty() for the higher levels), so those levels never get
+	// a glTexSubImage2D/glCompressedTexImage2D call - their storage exists but is left
+	// uninitialized. GL_TEXTURE_MAX_LEVEL still includes them as "valid" though, so an
+	// automatically-computed (derivative-based) LOD that lands on one of those levels samples
+	// whatever the driver's uninitialized image memory happens to contain - on this Zink/NVK
+	// driver, that reads back as solid black. Track the highest level actually written here and
+	// clamp GL_TEXTURE_MAX_LEVEL to it afterward, so sampling can never land on an unwritten
+	// level in the first place.
+	int highestWrittenLevel = -1;
 
 	for (int level = 0; level < numMips; level++)
 	{
@@ -155,11 +248,36 @@ void GLUploadManager::UploadData(GLTexture2D* image, const TextureInfo& Info, bo
 			}
 			else
 			{
+				// Compressed (BC) formats stay on mutable storage (see UploadTexture), so this
+				// can still respecify each level outright via glCompressedTexImage2D rather than
+				// being constrained to glCompressedTexSubImage2D's "must fit the level exactly
+				// as allocated" requirement.
+				// The data is padded up to whole 4x4 blocks (mipwidth/mipheight are clamped to minSize), but the
+				// level itself must be declared at its real size, max(1, base >> level): the 2x2 and 1x1 levels
+				// of a compressed chain are each one block of data. Declaring them as 4x4 instead makes the
+				// mip chain inconsistent, so the texture is incomplete and samples as black.
+				int levelWidth = std::max<int>(Mip->Width, 1);
+				int levelHeight = std::max<int>(Mip->Height, 1);
 				glBindTexture(GL_TEXTURE_2D, image->Handle);
-				glCompressedTexImage2D(GL_TEXTURE_2D, level + dummyMipmapCount, uploader->GetInternalformat(), mipwidth, mipheight, 0, mipsize, data);
+				glCompressedTexImage2D(GL_TEXTURE_2D, level + dummyMipmapCount, uploader->GetInternalformat(), levelWidth, levelHeight, 0, mipsize, data);
 				ThrowIfGLError("UploadData(compressed) failed");
 			}
+
+			highestWrittenLevel = level + dummyMipmapCount;
 		}
+		else if (highestWrittenLevel >= 0)
+		{
+			// The mip chain has a gap: this level (and everything smaller) never got written,
+			// even though a lower/larger level did. Stop extending the "known good" range here -
+			// completeness requires a contiguous run of levels from the base level up.
+			break;
+		}
+	}
+
+	if (highestWrittenLevel >= 0)
+	{
+		glBindTexture(GL_TEXTURE_2D, image->Handle);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, highestWrittenLevel);
 	}
 }
 

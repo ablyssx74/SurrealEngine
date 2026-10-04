@@ -1,5 +1,7 @@
 
 #include "Precomp.h"
+#include <cstdlib>
+#include <cstdio>
 #include "Engine.h"
 #include "Utils/File.h"
 #include "Utils/StrTools.h"
@@ -142,12 +144,19 @@ void Engine::Run()
 	if (!LaunchInfo.noEntryMap)
 		LoadEntryMap();
 
-	if (LaunchInfo.url.empty())
+	// A launch URL like "unreal://host:port" names a server, not a local map. Load the default
+	// map as usual and queue the join through ClientTravel so the main loop's Host branch handles it.
+	bool joinOnLaunch = !LaunchInfo.url.empty() && !UnrealURL(LaunchInfo.url).Host.empty();
+
+	if (LaunchInfo.url.empty() || joinOnLaunch)
 		LoadMap(GetDefaultURL(packages->GetIniValue("system", "URL", "LocalMap")));
 	else
 		LoadMap(UnrealURL(GetDefaultURL(packages->GetIniValue("system", "URL", "LocalMap")), LaunchInfo.url));
 
 	LoginPlayer();
+
+	if (joinOnLaunch)
+		ClientTravel(LaunchInfo.url, ETravelType::TRAVEL_Absolute, false);
 
 	auto objprop = GC::Alloc<UObjectProperty>(NameString(), nullptr, ObjectFlags::NoFlags);
 	auto vecprop = GC::Alloc<UStructProperty>(NameString(), nullptr, ObjectFlags::NoFlags);
@@ -194,6 +203,7 @@ void Engine::Run()
 		LevelInfo->Millisecond() = 0; // No timedesc equivalent for LevelInfo->Millisecond()
 
 		UpdateInput(realTimeElapsed);
+		remoteConnection.Tick(realTimeElapsed);
 
 		SetPause(!LevelInfo->Pauser().empty());
 
@@ -302,6 +312,26 @@ void Engine::Run()
 			LogMessage("Client travel to " + url.ToString());
 			LoadMap(url, CreateTravelInfo(ClientTravelInfo.TransferItems));
 			LoginPlayer();
+		}
+		else if (!ClientTravelInfo.URL.Host.empty())
+		{
+			// WIP: joining a real remote server. LoadMap() only ever loads from local packages
+			// and never runs here (a real join URL has no local map name - see UnrealURL.cpp),
+			// so without this branch a join attempt used to just silently do nothing. This
+			// doesn't implement UT99's actual netcode (see RemoteConnection.h) - it opens a raw
+			// UDP socket and sends a placeholder probe so the attempt is at least observable via
+			// SE_DEBUG_NET and a packet capture, as a first step toward the real thing.
+			LogMessage("Attempting to connect to " + ClientTravelInfo.URL.Host + ":" + std::to_string(ClientTravelInfo.URL.Port) + " (multiplayer join is not implemented yet)");
+			remoteConnection.Connect(ClientTravelInfo.URL.Host, ClientTravelInfo.URL.Port);
+			// Bug: UnrealURL()'s default constructor doesn't give an empty URL - its Map member
+			// defaults to "Index.unr" (see UnrealURL.h), a map this game doesn't ship. Assigning
+			// that here meant the very next frame's "if (!ClientTravelInfo.URL.Map.empty())" check
+			// above saw a non-empty Map again and tried to load it, crashing with "Could not open
+			// .../Maps/Index.unr". Clear() correctly empties Map (unlike the default constructor)
+			// but doesn't touch Host, so it's cleared explicitly too - otherwise this branch would
+			// keep re-firing (reconnecting every frame) instead of running once per join attempt.
+			ClientTravelInfo.URL.Clear();
+			ClientTravelInfo.URL.Host.clear();
 		}
 	}
 
@@ -657,7 +687,7 @@ void Engine::UnloadMap()
 	// GC::Collect();
 }
 
-void Engine::LoadMap(const UnrealURL& url, const std::map<std::string, std::string>& travelInfo)
+void Engine::LoadMap(const UnrealURL& url, const std::map<std::string, std::string>& travelInfo, bool isNetworkClient)
 {
 	ClientTravelInfo.URL.Clear();
 
@@ -678,11 +708,17 @@ void Engine::LoadMap(const UnrealURL& url, const std::map<std::string, std::stri
 
 	LevelInfo->ComputerName() = "MyComputer";
 	LevelInfo->HubStackLevel() = 0; // To do: handle level hubs
-	LevelInfo->EngineVersion() = LaunchInfo.gameVersionString + " SE";
+	// Bug: this used to append " SE" (presumably to self-identify as SurrealEngine), but
+	// EngineVersion/MinNetVersion aren't free-form display text - real script code treats them as a
+	// bare version number. E.g. UTBrowserUpdateServerLink.uc builds its MOTD/update-check URL as
+	// "/UpdateServer/utmotd" $ EngineVersion $ ".html", so the extra text produced a URL with an
+	// embedded space ("utmotd436 SE.html") that got rejected as a malformed HTTP request - and a
+	// real server's MinNetVersion compatibility check almost certainly expects a plain number too.
+	LevelInfo->EngineVersion() = LaunchInfo.gameVersionString;
 	if (LaunchInfo.ue1Version > 219)
-		LevelInfo->MinNetVersion() = LaunchInfo.gameVersionString + " SE";
+		LevelInfo->MinNetVersion() = LaunchInfo.gameVersionString;
 	LevelInfo->bHighDetailMode() = true;
-	LevelInfo->NetMode() = 0; // NM_StandAlone
+	LevelInfo->NetMode() = isNetworkClient ? NM_Client : 0 /* NM_StandAlone */;
 	LevelInfo->DefaultTexture() = engine->DefaultTexture;
 
 	LevelInfo->URL = url;
@@ -703,29 +739,50 @@ void Engine::LoadMap(const UnrealURL& url, const std::map<std::string, std::stri
 
 	LinkActorsToLevel();
 
-	// Find the game info class
-	UClass* gameInfoClass = packages->FindClass(LevelInfo->URL.GetOption("game"));
-	if (!gameInfoClass)
-		gameInfoClass = LevelInfo->DefaultGameType();
-	if (!gameInfoClass)
-		gameInfoClass = packages->FindClass(packages->GetIniValue("system", "Engine.Engine", "DefaultGame"));
-	if (!gameInfoClass)
-		gameInfoClass = packages->FindClass("Botpack.DeathMatchPlus");
-	if (!gameInfoClass)
-		Exception::Throw("Could not find any gameinfo class!");
+	if (isNetworkClient)
+	{
+		// A network client never runs GameInfo/InitGame itself - that's server-only (real UT99:
+		// UGameEngine::LoadMap only spawns GameInfo "if (GLevel->IsServer())"). It also destroys
+		// every non-static, non-bNoDelete actor it just loaded from the map file before BeginPlay
+		// runs, since those are dynamic actors (pawns, projectiles, already-taken pickups, etc.)
+		// that only exist because the level file's editor-placed snapshot doesn't reflect the
+		// server's actual live game state - they'll be recreated (or not) from real actor-channel
+		// replication instead. Static/bNoDelete actors (geometry, lights, movers, triggers) are
+		// assumed identical to the server's copy since both loaded the same package, and are left
+		// alone. UActor::Destroy() already no-ops for bStatic()/bNoDelete() actors, so this can
+		// call it unconditionally instead of duplicating that check here.
+		for (UActor* actor : Level->Actors)
+			if (actor)
+				actor->Destroy();
+	}
 
-	// Spawn GameInfo actor
-	GameInfo = UObject::Cast<UGameInfo>(LevelPackage->NewObject("gameinfo", gameInfoClass, ObjectFlags::NoFlags));
-	GameInfo->XLevel() = Level;
-	GameInfo->Level() = LevelInfo;
-	Level->Collision.AddToCollision(GameInfo);
-	GameInfo->Tag() = gameInfoClass->Name;
-	GameInfo->bTicked() = false;
-	GameInfo->InitActorZone();
-	GameInfo->Index = (int)Level->Actors.size();
-	Level->Actors.push_back(GameInfo);
+	// Find the game info class and spawn it - server-only; GameInfo stays null for a network client.
+	UClass* gameInfoClass = nullptr;
+	if (!isNetworkClient)
+	{
+		gameInfoClass = packages->FindClass(LevelInfo->URL.GetOption("game"));
+		if (!gameInfoClass)
+			gameInfoClass = LevelInfo->DefaultGameType();
+		if (!gameInfoClass)
+			gameInfoClass = packages->FindClass(packages->GetIniValue("system", "Engine.Engine", "DefaultGame"));
+		if (!gameInfoClass)
+			gameInfoClass = packages->FindClass("Botpack.DeathMatchPlus");
+		if (!gameInfoClass)
+			Exception::Throw("Could not find any gameinfo class!");
 
-	LevelInfo->Game() = GameInfo;
+		// Spawn GameInfo actor
+		GameInfo = UObject::Cast<UGameInfo>(LevelPackage->NewObject("gameinfo", gameInfoClass, ObjectFlags::NoFlags));
+		GameInfo->XLevel() = Level;
+		GameInfo->Level() = LevelInfo;
+		Level->Collision.AddToCollision(GameInfo);
+		GameInfo->Tag() = gameInfoClass->Name;
+		GameInfo->bTicked() = false;
+		GameInfo->InitActorZone();
+		GameInfo->Index = (int)Level->Actors.size();
+		Level->Actors.push_back(GameInfo);
+
+		LevelInfo->Game() = GameInfo;
+	}
 
 	if (!LevelInfo->bBegunPlay())
 	{
@@ -741,9 +798,12 @@ void Engine::LoadMap(const UnrealURL& url, const std::map<std::string, std::stri
 		size_t loadActorCount = Level->Actors.size();
 
 		LevelInfo->bStartup() = true;
-		CallEvent(GameInfo, EventName::InitGame, { ExpressionValue::StringValue(options), ExpressionValue::Variable(&error, stringProp) });
-		if (!error.empty())
-			Exception::Throw("InitGame failed: " + error);
+		if (GameInfo) // null for a network client - InitGame is server-only
+		{
+			CallEvent(GameInfo, EventName::InitGame, { ExpressionValue::StringValue(options), ExpressionValue::Variable(&error, stringProp) });
+			if (!error.empty())
+				Exception::Throw("InitGame failed: " + error);
+		}
 
 		// Note: the events may spawn actors. We can't use iterators here.
 		for (size_t i = 0; i < loadActorCount; i++) { if (Level->Actors[i]) CallEvent(Level->Actors[i], EventName::PreBeginPlay); }
@@ -797,9 +857,9 @@ void Engine::LoadFromSaveFile(const UnrealURL& url)
 	// re-established on every load regardless of what the package/save file contains.
 	LevelInfo->ComputerName() = "MyComputer";
 	LevelInfo->HubStackLevel() = 0; // To do: handle level hubs
-	LevelInfo->EngineVersion() = LaunchInfo.gameVersionString + " SE";
+	LevelInfo->EngineVersion() = LaunchInfo.gameVersionString;
 	if (LaunchInfo.ue1Version > 219)
-		LevelInfo->MinNetVersion() = LaunchInfo.gameVersionString + " SE";
+		LevelInfo->MinNetVersion() = LaunchInfo.gameVersionString;
 	LevelInfo->bHighDetailMode() = true;
 	LevelInfo->NetMode() = 0; // NM_StandAlone
 	LevelInfo->DefaultTexture() = engine->DefaultTexture;
@@ -859,6 +919,20 @@ void Engine::PossessSavedPlayer()
 	CallEvent(viewport->Actor(), EventName::Possess);
 
 	render->OnMapLoaded();
+}
+
+// Possesses a PlayerPawn that RemoteConnection received over the network as our own (see
+// RemoteConnection.h/.cpp) - the same viewport-assignment sequence LoginPlayer/PossessSavedPlayer
+// already use for a locally-spawned pawn, just without any of the local login/travel machinery
+// (that pawn was already spawned and initialized by the server, not by us).
+void Engine::PossessNetworkActor(UPlayerPawn* pawn)
+{
+	if (!pawn || !viewport)
+		return;
+
+	viewport->Actor() = pawn;
+	viewport->Actor()->Player() = viewport;
+	CallEvent(viewport->Actor(), EventName::Possess);
 }
 
 void Engine::SaveGameToSlot(int32_t slotNum, const std::string& saveDescription) const
@@ -1491,10 +1565,15 @@ void Engine::LoadKeybindings()
 		keybindings[keyname] = packages->GetIniValue("user", "Engine.Input", keyname);
 	}
 
-	for (int i = 0; i < 40; i++)
+	// Bug: this used to build a literal "Aliases[N]" string and pass it as the whole key name to
+	// GetIniValue, which only matches a key hashed from that exact bracketed string. On-disk
+	// "Aliases[N]=..." lines are actually stored as index N of a bare "Aliases" key (see the
+	// bracket-splitting done when ini files are parsed/loaded), so this never matched anything and
+	// inputAliases stayed permanently empty - meaning every stock alias-style binding (MoveForward,
+	// MoveBackward, StrafeLeft, StrafeRight, AltFire, etc.) silently failed to expand into its real
+	// Axis/Button command and fell through to ExecCommand() looking for a nonexistent Exec function.
+	for (const std::string& alias : packages->GetIniValues("user", "Engine.Input", "Aliases"))
 	{
-		std::string alias = packages->GetIniValue("user", "Engine.Input", "Aliases[" + std::to_string(i) + "]");
-
 		// Total trash parsing, but it will do for the aliases I have! Feel free to improve it!
 		std::string commandStart = "(Command=\"";
 		std::string commandSplit = "\",Alias=";
@@ -1515,6 +1594,13 @@ void Engine::LoadKeybindings()
 			}
 		}
 	}
+
+	if (std::getenv("SE_DEBUG_INPUT"))
+	{
+		fprintf(stderr, "[Input] LoadKeybindings: loaded %d input alias(es)\n", (int)inputAliases.size());
+		for (auto& it : inputAliases)
+			fprintf(stderr, "[Input] LoadKeybindings:   alias \"%s\" -> \"%s\"\n", it.first.c_str(), it.second.c_str());
+	}
 }
 
 void Engine::UpdateInput(float timeElapsed)
@@ -1527,7 +1613,16 @@ void Engine::UpdateInput(float timeElapsed)
 		tickDebugger();
 
 	if (!viewport->Actor())
+	{
+		static const bool debugInput = std::getenv("SE_DEBUG_INPUT") != nullptr;
+		static bool warnedNoActor = false;
+		if (debugInput && !warnedNoActor)
+		{
+			fprintf(stderr, "[Input] UpdateInput: viewport->Actor() is null - activeInputButtons/Axes are being set but never applied to anything\n");
+			warnedNoActor = true;
+		}
 		return;
+	}
 
 	for (auto& it : activeInputButtons)
 		viewport->Actor()->SetBool(it.first, true);
@@ -1602,6 +1697,9 @@ void Engine::TickWindow()
 
 void Engine::OnWindowPaint()
 {
+	// Fires (via SDL_EVENT_WINDOW_SHOWN/EXPOSED) as the window finishes appearing on
+	// screen, including the very first time at startup. See ReassertCursorLock().
+	ReassertCursorLock();
 }
 
 void Engine::OnWindowMouseMove(const Point& pos)
@@ -1623,6 +1721,13 @@ void Engine::OnWindowMouseDown(const Point& pos, EInputKey key)
 {
 	if (playingAvi)
 		return;
+
+	// A click into the game window is the clearest possible sign the player is engaging with
+	// it, and unlike a real OS focus-gained event, it's reliably delivered even in cases where
+	// the window technically never lost focus from SDL's point of view (e.g. clicking back into
+	// a windowed-mode window right after resizing it) - a gap OnWindowActivated() alone doesn't
+	// cover. See ReassertCursorLock().
+	ReassertCursorLock();
 
 	if (engine->dxRootWindow && engine->dxRootWindow->OnWindowMouseDown(pos, key))
 		return;
@@ -1689,6 +1794,8 @@ void Engine::OnWindowKeyChar(std::string chars)
 
 void Engine::OnWindowKeyDown(EInputKey key)
 {
+	static const bool debugInput = std::getenv("SE_DEBUG_INPUT") != nullptr;
+
 	if (playingAvi)
 	{
 		if (key == EInputKey::IK_Escape)
@@ -1697,24 +1804,46 @@ void Engine::OnWindowKeyDown(EInputKey key)
 	}
 
 	if (engine->dxRootWindow && engine->dxRootWindow->OnWindowKeyDown(key))
+	{
+		if (debugInput)
+			fprintf(stderr, "[Input] Engine::OnWindowKeyDown(%d): consumed by dxRootWindow (menu/UI), never reaches InputEvent\n", (int)key);
 		return;
+	}
 
+	if (debugInput)
+		fprintf(stderr, "[Input] Engine::OnWindowKeyDown(%d): passing to InputEvent(IST_Press)\n", (int)key);
 	InputEvent(key, IST_Press);
 }
 
 void Engine::OnWindowKeyUp(EInputKey key)
 {
+	static const bool debugInput = std::getenv("SE_DEBUG_INPUT") != nullptr;
+
 	if (playingAvi)
 		return;
 
 	if (engine->dxRootWindow && engine->dxRootWindow->OnWindowKeyUp(key))
+	{
+		if (debugInput)
+			fprintf(stderr, "[Input] Engine::OnWindowKeyUp(%d): consumed by dxRootWindow (menu/UI), never reaches InputEvent\n", (int)key);
 		return;
+	}
 
+	if (debugInput)
+		fprintf(stderr, "[Input] Engine::OnWindowKeyUp(%d): passing to InputEvent(IST_Release)\n", (int)key);
 	InputEvent(key, IST_Release);
 }
 
 void Engine::OnWindowGeometryChanged()
 {
+	// Used to call ReassertCursorLock() here (fires via SDL_EVENT_WINDOW_MOVED/
+	// PIXEL_SIZE_CHANGED/RESIZED), meant to catch the window settling into its final
+	// fullscreen bounds at startup. But this event also fires continuously while the player
+	// manually drags a windowed (non-fullscreen) window's edge to resize it, and forcing an
+	// unlock+relock of relative mouse mode mid-drag fought with the window manager's own
+	// mouse tracking for that drag - on Haiku this made the window jump to the corner and
+	// shrink instead of resizing normally. OnWindowPaint() (SHOWN/EXPOSED) already covers the
+	// startup case without that problem, so don't duplicate it here.
 }
 
 void Engine::OnWindowClose()
@@ -1725,11 +1854,41 @@ void Engine::OnWindowClose()
 void Engine::OnWindowActivated()
 {
 	//SetPause(false);
+
+	// A real focus round-trip (e.g. alt-tab away and back) is known to fix sluggish/laggy
+	// mouselook on some platforms. See ReassertCursorLock().
+	ReassertCursorLock();
 }
 
 void Engine::OnWindowDeactivated()
 {
 	//SetPause(true);
+
+	// Nothing here used to actually release relative mouse mode on losing focus - this relied
+	// entirely on the backend/OS releasing the mouse grab implicitly when the window lost focus.
+	// That's apparently not reliable everywhere (e.g. SDL2 on Haiku: alt-tabbing away left the
+	// cursor locked to the center of the screen system-wide, not just inside the game window).
+	// Explicitly unlocking here means losing focus always releases the grab regardless of backend
+	// behavior; OnWindowActivated()'s ReassertCursorLock() re-engages it when focus comes back.
+	if (window)
+		window->UnlockCursor();
+}
+
+void Engine::ReassertCursorLock()
+{
+	// Some platforms (e.g. SDL3 on Haiku) don't fully engage relative mouse mode on a window
+	// that wasn't actually focused (or wasn't done resizing into its final fullscreen bounds)
+	// yet at the moment LockCursor() first ran, leading to sluggish/laggy mouselook that only
+	// clears up once the window goes through a genuine focus round-trip. LockCursor() alone is
+	// a no-op once already "locked" from our point of view, so force a real unlock+relock cycle
+	// here instead. Called from window paint/geometry/activation callbacks so it happens
+	// automatically during the normal startup sequence, not only if the player manually
+	// alt-tabs away and back.
+	if (window && engine->LaunchInfo.ue1Version > 219 && !(viewport->bShowWindowsMouse() && viewport->bWindowsMouseAvailable()))
+	{
+		window->UnlockCursor();
+		window->LockCursor();
+	}
 }
 
 void Engine::OnWindowDpiScaleChanged()
@@ -1767,11 +1926,21 @@ void Engine::Key(std::string key)
 
 void Engine::InputEvent(EInputKey key, EInputType type, int delta)
 {
+	static const bool debugInput = std::getenv("SE_DEBUG_INPUT") != nullptr;
+
 	if (Frame::RunState != FrameRunState::Running || playingAvi)
+	{
+		if (debugInput)
+			fprintf(stderr, "[Input] InputEvent(%d): dropped, RunState=%d playingAvi=%d\n", (int)key, (int)Frame::RunState, (int)playingAvi);
 		return;
+	}
 
 	bool handled = CallEvent(console, EventName::KeyEvent, { ExpressionValue::ByteValue(key), ExpressionValue::ByteValue(type), ExpressionValue::FloatValue((float)delta) }).ToBool();
-	
+
+	if (debugInput)
+		fprintf(stderr, "[Input] InputEvent(%d, type=%d): console.KeyEvent handled=%d, binding=\"%s\"\n",
+			(int)key, (int)type, (int)handled, (key >= 0 && key < 256) ? keybindings[keynames[key]].c_str() : "(out of range)");
+
 	if (!handled)
 	{
 		if ((type == EInputType::IST_Press || type == EInputType::IST_Axis) && key >= 0 && key < 256)
@@ -1796,11 +1965,19 @@ void Engine::InputEvent(EInputKey key, EInputType type, int delta)
 		}
 		else if (type == EInputType::IST_Release)
 		{
+			// activeInputButtons/Axes track which physical key maps to which named button/axis
+			// regardless of whether a pawn is currently possessed (see InputCommand) - a network
+			// client can have no possessed pawn yet (see UpdateInput's matching null check), so
+			// releasing a key bound to Fire/AltFire/etc. before that happens must not dereference
+			// a null Actor().
+			UActor* actor = viewport->Actor();
+
 			for (auto it = activeInputButtons.begin(); it != activeInputButtons.end();)
 			{
 				if (it->second == key)
 				{
-					viewport->Actor()->SetBool(it->first, false);
+					if (actor)
+						actor->SetBool(it->first, false);
 					it = activeInputButtons.erase(it);
 				}
 				else
@@ -1813,7 +1990,8 @@ void Engine::InputEvent(EInputKey key, EInputType type, int delta)
 			{
 				if (it->second.Key == key)
 				{
-					viewport->Actor()->SetFloat(it->first, 0.0f);
+					if (actor)
+						actor->SetFloat(it->first, 0.0f);
 					it = activeInputAxes.erase(it);
 				}
 				else
@@ -1827,12 +2005,29 @@ void Engine::InputEvent(EInputKey key, EInputType type, int delta)
 
 bool Engine::ExecCommand(const Array<std::string>& args)
 {
+	static const bool debugInput = std::getenv("SE_DEBUG_INPUT") != nullptr;
+
+	const char* targetNames[2] = { "viewport->Actor()", "console" };
+	int targetIndex = 0;
 	for (UObject* target : { static_cast<UObject*>(viewport->Actor()), static_cast<UObject*>(console) })
 	{
+		const char* targetName = targetNames[targetIndex++];
+
 		if (!target)
+		{
+			if (debugInput)
+				fprintf(stderr, "[Input] ExecCommand(\"%s\"): target=%s is null, skipping\n", args[0].c_str(), targetName);
 			continue;
+		}
 
 		UFunction* func = FindEventFunction(target, args[0]);
+		if (debugInput)
+		{
+			if (!func)
+				fprintf(stderr, "[Input] ExecCommand(\"%s\"): target=%s (class=%s) FindEventFunction found nothing\n", args[0].c_str(), targetName, target->Class ? target->Class->Name.ToString().c_str() : "?");
+			else
+				fprintf(stderr, "[Input] ExecCommand(\"%s\"): target=%s (class=%s) FindEventFunction found \"%s\", FuncFlags=0x%llx, HasExecFlag=%d\n", args[0].c_str(), targetName, target->Class ? target->Class->Name.ToString().c_str() : "?", func->Name.ToString().c_str(), (unsigned long long)func->FuncFlags, AllFlags(func->FuncFlags, FunctionFlags::Exec) ? 1 : 0);
+		}
 		if (func && AllFlags(func->FuncFlags, FunctionFlags::Exec))
 		{
 			Array<ExpressionValue> vmArgs;
@@ -1895,6 +2090,8 @@ bool Engine::ExecCommand(const Array<std::string>& args)
 
 void Engine::InputCommand(const std::string& commands, EInputKey key, int delta)
 {
+	static const bool debugInput = std::getenv("SE_DEBUG_INPUT") != nullptr;
+
 	for (const std::string& commandline : GetSubcommands(commands))
 	{
 		Array<std::string> args = GetArgs(commandline);
@@ -1906,6 +2103,9 @@ void Engine::InputCommand(const std::string& commands, EInputKey key, int delta)
 			if (command == "button" && args.size() == 2)
 			{
 				activeInputButtons[args[1]] = key;
+				if (debugInput)
+					fprintf(stderr, "[Input] InputCommand: activeInputButtons[\"%s\"] = key %d (viewport->Actor()=%p)\n",
+						args[1].c_str(), (int)key, (void*)(viewport ? viewport->Actor() : nullptr));
 			}
 			else if (command == "axis" && args.size() == 3)
 			{
@@ -1913,9 +2113,14 @@ void Engine::InputCommand(const std::string& commands, EInputKey key, int delta)
 				if (args[2].size() > 6 && args[2].substr(0, 6) == "Speed=")
 					speed = (float)std::atof(args[2].substr(6).c_str());
 				activeInputAxes[args[1]] = { speed * delta, key };
+				if (debugInput)
+					fprintf(stderr, "[Input] InputCommand: activeInputAxes[\"%s\"] = {value=%f, key=%d} (viewport->Actor()=%p)\n",
+						args[1].c_str(), speed * delta, (int)key, (void*)(viewport ? viewport->Actor() : nullptr));
 			}
 			else
 			{
+				if (debugInput)
+					fprintf(stderr, "[Input] InputCommand: ExecCommand(\"%s\")\n", commandline.c_str());
 				ExecCommand(args);
 			}
 		}

@@ -8,6 +8,7 @@
 #include "Utils/File.h"
 #include "Utils/StrTools.h"
 #include "VM/NativeFunc.h"
+#include <cstdlib>
 #include "Packages/ConSys/UConAudioList.h"
 #include "Packages/ConSys/UConCamera.h"
 #include "Packages/ConSys/UConChoice.h"
@@ -319,6 +320,8 @@ PackageManager::PackageManager(const GameLaunchInfo& launchInfo) : launchInfo(la
 	CreateTransientPackage();
 	RegisterFunctions();
 	LoadEngineIniFiles();
+	UpdateDeadMasterServerAddresses();
+	DefaultToLanNetSpeed();
 	LoadFileExtensions();
 	LoadIntFiles();
 	LoadPackageRemaps();
@@ -528,6 +531,24 @@ void PackageManager::ScanPaths()
 			mapFolders.push_back(finalPath.string());
 
 		ScanFolder(finalPath.string(), filename.string());
+	}
+
+	// Packages RemoteConnection downloaded from a server in a past session (see
+	// RegisterDownloadedPackage) live in the cache folder, saved under their real package name -
+	// not one of the Paths= entries above, so they need their own scan. Anything a real content
+	// folder already provided a file for above always wins (same "don't add it again" rule
+	// ScanFolder itself already follows), so this only fills in packages nothing else supplied.
+	if (fs::exists(gameCacheFolderPath))
+	{
+		for (const auto& dir_entry : fs::directory_iterator{ gameCacheFolderPath })
+		{
+			if (dir_entry.is_regular_file())
+			{
+				NameString fileNameString(dir_entry.path().stem().string());
+				if (packageFilenames.find(fileNameString) == packageFilenames.end())
+					packageFilenames[fileNameString] = dir_entry.path().string();
+			}
+		}
 	}
 
 	if (IsKlingonHonorGuard())
@@ -787,14 +808,14 @@ Array<std::string> PackageManager::GetDefUserIniValues(const NameString& section
 	return defaultUserFile->GetValues(sectionName, keyName, default_values);
 }
 
-void PackageManager::SetIniValue(NameString iniName, const NameString& sectionName, const NameString& keyName, const std::string& newValue, const int index)
+void PackageManager::SetIniValue(NameString iniName, const NameString& sectionName, const NameString& keyName, const std::string& newValue, const int index, const bool indexed)
 {
-	LoadIniFile(iniName)->SetValue(sectionName, keyName, newValue, index);
+	LoadIniFile(iniName)->SetValue(sectionName, keyName, newValue, index, indexed);
 }
 
-void PackageManager::SetIniValues(NameString iniName, const NameString& sectionName, const NameString& keyName, const Array<std::string>& newValues)
+void PackageManager::SetIniValues(NameString iniName, const NameString& sectionName, const NameString& keyName, const Array<std::string>& newValues, const bool indexed)
 {
-	LoadIniFile(iniName)->SetValues(sectionName, keyName, newValues);
+	LoadIniFile(iniName)->SetValues(sectionName, keyName, newValues, indexed);
 }
 
 void PackageManager::SaveAllIniFiles()
@@ -857,6 +878,128 @@ void PackageManager::LoadEngineIniFiles()
 		iniFiles["User"] = std::make_unique<IniFile>((gameSystemFolderPath / userIniName).string());
 		defaultUserFile = std::make_unique<IniFile>((gameSystemFolderPath / "DefUser.ini").string());
 	}
+}
+
+void PackageManager::UpdateDeadMasterServerAddresses()
+{
+	// UT99's original master servers have all been offline for years (Epic shut theirs down in
+	// Dec 2022, GameSpy's closed back in 2014, mplayer.com is long gone too), so a stock install's
+	// ini - or an existing SE-[GameName].ini generated before this fix - still points server
+	// browsing at addresses that will never answer. Swap in currently-live, community-run
+	// replacements wherever these specific known-dead hostnames are still configured. This only
+	// ever touches these exact old addresses, so anything a user (or a community-updated ini
+	// they've installed) has deliberately pointed elsewhere - their own master server, say - is
+	// left untouched.
+	static const std::pair<std::string, std::string> replacements[] =
+	{
+		{ "unreal.epicgames.com", "master.oldunreal.com" },
+		{ "master0.gamespy.com", "master.333networks.com" },
+		{ "master.mplayer.com", "master.openspy.net" },
+	};
+
+	static const bool debugNet = std::getenv("SE_DEBUG_NET") != nullptr;
+
+	auto patchValues = [&](const NameString& section, const NameString& key, bool indexed)
+		{
+			Array<std::string> values = GetIniValues("System", section, key);
+			if (debugNet)
+			{
+				fprintf(stderr, "[Net] UpdateDeadMasterServerAddresses: [%s] %s has %d value(s) before patching\n",
+					section.ToString().c_str(), key.ToString().c_str(), (int)values.size());
+				for (const std::string& value : values)
+					fprintf(stderr, "[Net]   \"%s\"\n", value.c_str());
+			}
+
+			bool changed = false;
+			for (std::string& value : values)
+			{
+				for (const auto& replacement : replacements)
+				{
+					size_t pos = value.find(replacement.first);
+					if (pos != std::string::npos)
+					{
+						value.replace(pos, replacement.first.size(), replacement.second);
+						changed = true;
+					}
+				}
+			}
+
+			if (changed)
+			{
+				SetIniValues("System", section, key, values, indexed);
+				if (debugNet)
+				{
+					fprintf(stderr, "[Net] UpdateDeadMasterServerAddresses: [%s] %s patched:\n", section.ToString().c_str(), key.ToString().c_str());
+					for (const std::string& value : values)
+						fprintf(stderr, "[Net]   \"%s\"\n", value.c_str());
+				}
+			}
+			else if (debugNet)
+			{
+				fprintf(stderr, "[Net] UpdateDeadMasterServerAddresses: [%s] %s - no known-dead address found, nothing changed\n",
+					section.ToString().c_str(), key.ToString().c_str());
+			}
+		};
+
+	// ServerActors=IpServer.UdpServerUplink MasterServerAddress=... (only matters for hosting -
+	// this is the address a hosted server advertises itself to)
+	patchValues("Engine.GameEngine", "ServerActors", false);
+
+	// ListFactories[N]=UBrowser.UBrowserGSpyFact,MasterServerAddress=... (the address the client
+	// queries to populate the Internet server browser tab)
+	patchValues("UBrowserAll", "ListFactories", true);
+
+	// Older/base UT99 installs (e.g. a plain retail CD install that never had a later community
+	// patch applied) may not have a [UBrowserAll] section with any ListFactories at all - nothing
+	// above found for patchValues() to fix, since there's nothing there to begin with. Populate it
+	// from scratch in that case, so internet browsing works even starting from a bare install
+	// rather than only fixing an existing-but-dead configuration.
+	if (GetIniValues("System", "UBrowserAll", "ListFactories").empty())
+	{
+		// This list mirrors what a current community-patched UnrealTournament.ini ships (more
+		// candidates = better odds at least one master server actually answers, plus a plain HTTP
+		// server-list fallback that doesn't depend on the old GameSpy TCP protocol at all).
+		SetIniValues("System", "UBrowserAll", "ListFactories",
+			{
+				"UBrowser.UBrowserGSpyFact,MasterServerAddress=master.333networks.com,MasterServerTCPPort=28900,Region=0,GameName=ut",
+				"UBrowser.UBrowserGSpyFact,MasterServerAddress=master.oldunreal.com,MasterServerTCPPort=28900,Region=0,GameName=ut",
+				"UBrowser.UBrowserGSpyFact,MasterServerAddress=master.errorist.eu,MasterServerTCPPort=28900,Region=0,GameName=ut",
+				"UBrowser.UBrowserGSpyFact,MasterServerAddress=master.noccer.de,MasterServerTCPPort=28900,Region=0,GameName=ut",
+				"UBrowser.UBrowserGSpyFact,MasterServerAddress=master.openspy.net,MasterServerTCPPort=28900,Region=0,GameName=ut",
+				"UBrowser.UBrowserGSpyFact,MasterServerAddress=master.hypercoop.tk,MasterServerTCPPort=28900,Region=0,GameName=ut",
+				"UBrowser.UBrowserHTTPFact,MasterServerAddress=lists.gameserverlister.com,MasterServerTCPPort=80,MasterServerURI=/ut-servers-pc.txt",
+				"UBrowser.UBrowserGSpyFact,MasterServerAddress=master.newbiesplayground.net,MasterServerTCPPort=28900,Region=0,GameName=ut",
+				"UBrowser.UBrowserGSpyFact,MasterServerAddress=master.frag-net.com,MasterServerTCPPort=28900,Region=0,GameName=ut",
+				"UBrowser.UBrowserGSpyFact,MasterServerAddress=master-au.unrealarchive.org,MasterServerTCPPort=28900,Region=0,GameName=ut",
+				"UBrowser.UBrowserGSpyFact,MasterServerAddress=master2.qtracker.com,MasterServerTCPPort=28900,Region=0,GameName=ut",
+				"UBrowser.UBrowserGSpyFact,MasterServerAddress=medor.no-ip.org,MasterServerTCPPort=28900,Region=0,GameName=ut",
+			}, true);
+		// bHidden: this section is an aggregation source other tabs subset from, not a tab of its
+		// own. bFallbackFactories: try the next ListFactories entry if one master server doesn't
+		// answer, instead of giving up after the first.
+		if (GetIniValue("System", "UBrowserAll", "bHidden").empty())
+			SetIniValue("System", "UBrowserAll", "bHidden", "True");
+		if (GetIniValue("System", "UBrowserAll", "bFallbackFactories").empty())
+			SetIniValue("System", "UBrowserAll", "bFallbackFactories", "True");
+		if (debugNet)
+			fprintf(stderr, "[Net] UpdateDeadMasterServerAddresses: [UBrowserAll] had no ListFactories at all - populated with defaults\n");
+	}
+}
+
+void PackageManager::DefaultToLanNetSpeed()
+{
+	// The network speed option (Dial-up/ISDN/Cable/LAN) is supposed to persist which of
+	// ConfiguredInternetSpeed/ConfiguredLanSpeed under [Engine.Player] is active, but that
+	// doesn't currently survive a restart and hasn't been root-caused yet. There's also no real
+	// multiplayer netcode in this engine yet to actually throttle a connection based on either
+	// value in the first place - both are pure UnrealScript-interpreted properties, never read
+	// anywhere in this engine's own C++ code. So rather than chase a UI persistence bug for a
+	// setting with no functional effect yet, just make the Internet preset equal the LAN preset,
+	// so whichever one ends up selected, it's the fast one.
+	std::string lanSpeed = GetIniValue("System", "Engine.Player", "ConfiguredLanSpeed", "20000");
+	SetIniValue("System", "Engine.Player", "ConfiguredInternetSpeed", lanSpeed);
+	if (std::getenv("SE_DEBUG_CONFIG"))
+		fprintf(stderr, "[Config] DefaultToLanNetSpeed: ConfiguredInternetSpeed set to %s (matching ConfiguredLanSpeed)\n", lanSpeed.c_str());
 }
 
 void PackageManager::LoadFileExtensions()

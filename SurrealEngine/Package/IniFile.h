@@ -69,8 +69,8 @@ public:
 	std::string GetValue(const NameString& sectionName, const NameString& keyName, const std::string& defaultValue = "", const int index = 0) const;
 	Array<std::string> GetValues(const NameString& sectionName, const NameString& keyName, const Array<std::string>& defaultValues = {}) const;
 
-	void SetValue(const NameString& sectionName, const NameString& keyName, const std::string& newValue, const int index = 0);
-	void SetValues(const NameString& sectionName, const NameString& keyName, const Array<std::string>& newValues);
+	void SetValue(const NameString& sectionName, const NameString& keyName, const std::string& newValue, const int index = 0, const bool indexed = false);
+	void SetValues(const NameString& sectionName, const NameString& keyName, const Array<std::string>& newValues, const bool indexed = false);
 
 	// Saves values to the ini file the said values are loaded from
 	void SaveTo();

@@ -192,10 +192,7 @@ BackendFactory &SDL2BackendFactory::getFactory()
 
 bool SDL2BackendFactory::init()
 {
-    bool ok = (SDL_InitSubSystem(SDL_INIT_AUDIO) == 0);
-    if (!ok)
-        fprintf(stderr, "[OpenAL SDL2] SDL_InitSubSystem(SDL_INIT_AUDIO) failed: %s\n", SDL_GetError());
-    return ok;
+    return SDL_InitSubSystem(SDL_INIT_AUDIO) == 0;
 }
 
 bool SDL2BackendFactory::querySupport(BackendType type)

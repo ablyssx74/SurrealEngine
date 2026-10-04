@@ -38,7 +38,10 @@ NameString ToNameString(EventName name)
 		"Reset", "PreRender", "RenderOverlays", "PostRender",
 		"NotifyLevelChange", "InitGame", "PreLogin", "Login",
 		"Possess", "TravelPreAccept", "AcceptInventory", "TravelPostAccept",
-		"PostLogin", "KeyType", "KeyEvent"
+		"PostLogin", "KeyType", "KeyEvent",
+
+		// IpDrv link events:
+		"Opened", "Closed", "Accepted", "ReceivedText", "ReceivedLine", "ReceivedBinary"
 	};
 	return names[(int)name];
 }

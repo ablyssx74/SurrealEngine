@@ -8,9 +8,11 @@
 #include "Math/halffloat.h"
 #include "Packages/Engine/Resources/Level/UModel.h"
 #include <surrealwidgets/core/widget.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
 
 static Widget* InitGLWidget = nullptr;
 extern "C"
@@ -924,6 +926,20 @@ void GLRenderDevice::MapVertices(bool nextBuffer)
 		Stats.BuffersUsed++;
 	}
 
+	// A streaming buffer that's been filled right up to its last slot has zero room left.
+	// glMapBufferRange with a length of 0 is invalid (GL_INVALID_OPERATION, returns null),
+	// so treat "no room left" the same as "need a fresh buffer" instead of ever attempting that.
+	if (GLSceneVertexPos >= SceneVertexBufferSize)
+	{
+		GLSceneVertexPos = 0;
+		nextBuffer = true;
+	}
+	if (SceneIndexPos >= SceneIndexBufferSize)
+	{
+		SceneIndexPos = 0;
+		nextBuffer = true;
+	}
+
 	if (!SceneVertices)
 	{
 		glBindBuffer(GL_ARRAY_BUFFER, ScenePass.VertexBuffer->Handle);
@@ -1038,15 +1054,6 @@ void GLRenderDevice::Lock(vec4 InFlashScale, vec4 InFlashFog, vec4 ScreenClear, 
 	ForceHitIndex = -1;
 
 	IsLocked = true;
-
-	// Diagnostic: periodically dump what's actually being submitted to the renderer,
-	// to tell apart "surfaces aren't being drawn at all" from "they're drawn but wrong".
-	static int lockCount = 0;
-	if ((lockCount++ % 60) == 0)
-	{
-		fprintf(stderr, "[GL] ClearColor: (%.2f, %.2f, %.2f, %.2f)  Stats since startup: ComplexSurfaces=%d GouraudPolygons=%d Tiles=%d DrawCalls=%d\n",
-			color[0], color[1], color[2], color[3], Stats.ComplexSurfaces, Stats.GouraudPolygons, Stats.Tiles, Stats.DrawCalls);
-	}
 
 	ThrowIfGLError("Lock failed");
 }
@@ -1330,6 +1337,94 @@ void GLRenderDevice::DrawComplexSurface(SceneNode* Frame, SurfaceInfo& Surface, 
 	info.facet = &Facet;
 	info.tex = Textures->GetTexture(Surface.Texture, !!(PolyFlags & PF_Masked));
 
+	// Diagnostic escape hatch: set SE_DEBUG_FORCE_FIRST_REAL_TEX=1 to reuse the FIRST real
+	// (non-nulltex) world texture encountered for every subsequent world surface, instead of
+	// each surface's own texture. Real textures sample as black no matter what (upload
+	// correctness, mip completeness, a real shader interface bug, forced LOD 0, immutable
+	// storage - all ruled out or fixed with no change), while nulltex - reused unchanged for
+	// every world draw call - is proven to work. This isolates "real (non-1x1) textures are
+	// broken" from "switching between many different bound textures across draw calls is
+	// broken": a real texture reused with zero churn behaves like nulltex if it's the latter,
+	// or still fails if it's the former.
+	static const bool debugForceFirstRealTex = std::getenv("SE_DEBUG_FORCE_FIRST_REAL_TEX") != nullptr;
+	static GLCachedTexture* debugFirstRealTex = nullptr;
+	if (debugForceFirstRealTex)
+	{
+		if (!debugFirstRealTex && info.tex != nulltex)
+			debugFirstRealTex = info.tex;
+		if (debugFirstRealTex)
+			info.tex = debugFirstRealTex;
+	}
+
+	// Diagnostic escape hatch: set SE_DEBUG_READBACK_WORLDTEX=1 to read real world surfaces'
+	// base textures straight back from the GPU (via glGetTexImage) right after they're bound
+	// here, and print stats + a few sample texels. This tells apart "the GPU-resident copy is
+	// already black" (an upload-side driver bug) from "the copy is fine but sampling it at draw
+	// time returns black" (a binding/sampler driver bug). Printed for the first several DISTINCT
+	// real (non-nulltex), reasonably large (>=128px wide - skips tiny HUD/icon textures that may
+	// be legitimately near-black by design) world textures encountered.
+	static const bool debugReadbackWorldTex = std::getenv("SE_DEBUG_READBACK_WORLDTEX") != nullptr;
+	static std::vector<GLuint> debugReadbackWorldTexSeen;
+	if (debugReadbackWorldTex && debugReadbackWorldTexSeen.size() < 8 && info.tex != nulltex && info.tex->Texture)
+	{
+		GLuint handle = info.tex->Texture->Handle;
+		bool alreadySeen = std::find(debugReadbackWorldTexSeen.begin(), debugReadbackWorldTexSeen.end(), handle) != debugReadbackWorldTexSeen.end();
+		GLint w = 0, h = 0;
+		glBindTexture(GL_TEXTURE_2D, handle);
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h);
+		if (!alreadySeen && w >= 128 && h >= 128)
+		{
+			debugReadbackWorldTexSeen.push_back(handle);
+			std::vector<uint8_t> pixels(static_cast<size_t>(w) * h * 4);
+			glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+			GLenum err = glGetError();
+			size_t center = ((pixels.size() / 2) / 4) * 4;
+			int nonblack = 0;
+			uint64_t sumR = 0, sumG = 0, sumB = 0;
+			for (size_t i = 0; i < pixels.size(); i += 4)
+			{
+				if (pixels[i] || pixels[i + 1] || pixels[i + 2])
+					nonblack++;
+				sumR += pixels[i];
+				sumG += pixels[i + 1];
+				sumB += pixels[i + 2];
+			}
+			uint32_t texelCount = static_cast<uint32_t>(w) * h;
+			fprintf(stderr, "[Readback] World base tex handle=%u %dx%d glGetTexImage err=0x%04x\n",
+				handle, w, h, err);
+			fprintf(stderr, "[Readback] %d/%u texels non-black. Avg=(%u,%u,%u) First=(%u,%u,%u,%u) Center=(%u,%u,%u,%u)\n",
+				nonblack, texelCount,
+				(unsigned)(sumR / texelCount), (unsigned)(sumG / texelCount), (unsigned)(sumB / texelCount),
+				pixels[0], pixels[1], pixels[2], pixels[3],
+				pixels[center], pixels[center + 1], pixels[center + 2], pixels[center + 3]);
+
+			// Compute what the CPU-side source data (raw P8 indices run through the palette)
+			// for this exact texture says the average should be, so it can be compared directly
+			// against what actually landed on the GPU above - the decisive test for whether the
+			// upload itself is losing/corrupting data on this driver.
+			if (Surface.Texture && Surface.Texture->Format == TextureFormat::P8 && Surface.Texture->Palette
+				&& Surface.Texture->NumMips > 0 && Surface.Texture->Mips && !Surface.Texture->Mips[0].Data.empty())
+			{
+				const UnrealMipmap& mip = Surface.Texture->Mips[0];
+				const TextureColor* palette = Surface.Texture->Palette;
+				uint64_t cpuSumR = 0, cpuSumG = 0, cpuSumB = 0;
+				size_t texelN = (size_t)mip.Width * mip.Height;
+				for (size_t i = 0; i < texelN && i < mip.Data.size(); i++)
+				{
+					const TextureColor& c = palette[mip.Data[i]];
+					cpuSumR += c.R;
+					cpuSumG += c.G;
+					cpuSumB += c.B;
+				}
+				fprintf(stderr, "[Readback] CPU source (P8+palette) for same texture: %dx%d Avg=(%u,%u,%u)\n",
+					mip.Width, mip.Height,
+					(unsigned)(cpuSumR / texelN), (unsigned)(cpuSumG / texelN), (unsigned)(cpuSumB / texelN));
+			}
+		}
+		glBindTexture(GL_TEXTURE_2D, 0);
+	}
+
 	// Diagnostic escape hatch: set SE_DEBUG_FORCE_NULLTEX_WORLD=1 to use the engine's own
 	// known-good 1x1 white texture (used everywhere else as the "no texture" fallback) as the
 	// base texture for world surfaces, through the completely normal render path (darkClamp,
@@ -1340,8 +1435,74 @@ void GLRenderDevice::DrawComplexSurface(SceneNode* Frame, SurfaceInfo& Surface, 
 	// in the binding/pipeline for this draw call, not any specific texture's content.
 	static const bool debugForceNulltexWorld = std::getenv("SE_DEBUG_FORCE_NULLTEX_WORLD") != nullptr;
 	if (debugForceNulltexWorld)
+	{
 		info.tex = nulltex;
+	}
+#ifdef __HAIKU__
+	else
+	{
+		// Was a permanent workaround for world surfaces sampling as solid black on Haiku -
+		// root-caused and fixed (see GLUploadManager::ShouldForceSingleMipLevel): any
+		// mipmap-complete texture with more than one level sampled as black here, reproduced
+		// identically on both Zink/NVK and Haiku's stock software Mesa, so every texture is now
+		// forced to a single mip level on this platform, which restores real texture sampling.
+		// Kept as a manual fallback (substitute nulltex + the real texture's average color) in
+		// case some other case still needs it - set SE_FORCE_FLATCOLOR_WORKAROUND=1.
+		static const bool forceWorkaround = std::getenv("SE_FORCE_FLATCOLOR_WORKAROUND") != nullptr;
+		if (forceWorkaround)
+		{
+			info.texcolor = vec4(info.tex->AverageColorR, info.tex->AverageColorG, info.tex->AverageColorB, 1.0f);
+			info.tex = nulltex;
+		}
+	}
+#endif
 	info.lightmap = Textures->GetTexture(Surface.LightMap, false);
+
+	// Diagnostic escape hatch: set SE_DEBUG_READBACK_LIGHTMAP=1 to run the exact same GPU
+	// readback as SE_DEBUG_READBACK_WORLDTEX, but on the lightmap texture instead of the base
+	// texture. Base textures are proven correct on the GPU and are legitimately dim by design
+	// (meant to be multiplied up by the lightmap), so if the lightmap itself reads back as
+	// black, that alone would fully explain "dim base * black lightmap = pure black" without
+	// the base texture being at fault at all - a texture we've never actually verified before.
+	static const bool debugReadbackLightmap = std::getenv("SE_DEBUG_READBACK_LIGHTMAP") != nullptr;
+	static std::vector<GLuint> debugReadbackLightmapSeen;
+	if (debugReadbackLightmap && debugReadbackLightmapSeen.size() < 8 && info.lightmap != nulltex && info.lightmap->Texture)
+	{
+		GLuint handle = info.lightmap->Texture->Handle;
+		bool alreadySeen = std::find(debugReadbackLightmapSeen.begin(), debugReadbackLightmapSeen.end(), handle) != debugReadbackLightmapSeen.end();
+		GLint w = 0, h = 0;
+		glBindTexture(GL_TEXTURE_2D, handle);
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h);
+		if (!alreadySeen && w > 0 && h > 0)
+		{
+			debugReadbackLightmapSeen.push_back(handle);
+			std::vector<uint8_t> pixels(static_cast<size_t>(w) * h * 4);
+			glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+			GLenum err = glGetError();
+			size_t center = ((pixels.size() / 2) / 4) * 4;
+			int nonblack = 0;
+			uint64_t sumR = 0, sumG = 0, sumB = 0;
+			for (size_t i = 0; i < pixels.size(); i += 4)
+			{
+				if (pixels[i] || pixels[i + 1] || pixels[i + 2])
+					nonblack++;
+				sumR += pixels[i];
+				sumG += pixels[i + 1];
+				sumB += pixels[i + 2];
+			}
+			uint32_t texelCount = static_cast<uint32_t>(w) * h;
+			fprintf(stderr, "[Readback] Lightmap handle=%u %dx%d glGetTexImage err=0x%04x\n",
+				handle, w, h, err);
+			fprintf(stderr, "[Readback] %d/%u texels non-black. Avg=(%u,%u,%u) First=(%u,%u,%u,%u) Center=(%u,%u,%u,%u)\n",
+				nonblack, texelCount,
+				(unsigned)(sumR / texelCount), (unsigned)(sumG / texelCount), (unsigned)(sumB / texelCount),
+				pixels[0], pixels[1], pixels[2], pixels[3],
+				pixels[center], pixels[center + 1], pixels[center + 2], pixels[center + 3]);
+		}
+		glBindTexture(GL_TEXTURE_2D, 0);
+	}
+
 	info.macrotex = Textures->GetTexture(Surface.MacroTexture, false);
 	info.detailtex = Textures->GetTexture(Surface.DetailTexture, false);
 	info.fogmap = (Surface.FogMap && Surface.FogMap->NumMips > 0 && !Surface.FogMap->Mips[0].Data.empty()) ?
@@ -1385,9 +1546,30 @@ void GLRenderDevice::DrawComplexSurfaceFaces(const ComplexSurfaceInfo& info)
 	// whether the base texture sample itself is the black culprit.
 	static const bool debugShowBaseTex = std::getenv("SE_DEBUG_SHOW_BASETEX") != nullptr;
 
+	// Diagnostic escape hatch: set SE_DEBUG_FORCE_LOD0=1 to bypass the driver's automatically
+	// computed (screen-space-derivative-based) LOD for the base texture and always sample mip
+	// level 0. World surfaces are large, often screen-filling polygons with much steeper
+	// per-pixel texture-coordinate derivatives than a typical mesh - if automatic LOD selection
+	// is landing on an inappropriately high (small) mip level for them, this isolates that.
+	static const bool debugForceLod0 = std::getenv("SE_DEBUG_FORCE_LOD0") != nullptr;
+
+	// Diagnostic escape hatch: set SE_DEBUG_WRAP_TEXCOORD=1 to pre-wrap the base texture's s/t
+	// coordinates into [0,1) on the CPU before upload, instead of relying on the GPU's GL_REPEAT
+	// wrapping. World surface UVs are computed here from world-space positions (u - UPan) * UMult,
+	// which for a normal-sized level can land far outside [0,1] (tens to hundreds) - the sampler
+	// is expected to fold that back down via GL_REPEAT. Mesh (Gouraud) UVs are already close to
+	// [0,1] by contrast. SE_DEBUG_FORCE_LOD0 already ruled out automatic derivative-based LOD
+	// selection as the culprit, but textureLod() still goes through the same GPU-side wrap logic -
+	// this isolates whether wrapping a large out-of-range REPEAT coordinate is itself broken on
+	// this Zink/NVK driver, independent of which LOD gets sampled. Wrapping per-vertex like this
+	// will visibly tear the texture across the polygon (expected/harmless for this test) - the
+	// only thing that matters is whether real texture detail appears at all instead of solid black.
+	static const bool debugWrapTexCoord = std::getenv("SE_DEBUG_WRAP_TEXCOORD") != nullptr;
+
 	uint32_t flags = 0;
 	if (debugMagenta) flags |= 128;
 	if (debugShowBaseTex) flags |= 256;
+	if (debugForceLod0) flags |= 512;
 	if (info.lightmap != nulltex && !disableLightmap) flags |= 1;
 	if (info.macrotex != nulltex) flags |= 2;
 	if (info.detailtex != nulltex && info.fogmap == nulltex) flags |= 4;
@@ -1417,7 +1599,40 @@ void GLRenderDevice::DrawComplexSurfaceFaces(const ComplexSurfaceInfo& info)
 	float DetailUMult = info.fogmap == nulltex ? info.detailtex->UMult : info.fogmap->UMult;
 	float DetailVMult = info.fogmap == nulltex ? info.detailtex->VMult : info.fogmap->VMult;
 
+	// Diagnostic escape hatch: set SE_DEBUG_PRINT_TEXCOORD=1 to print the base texture's Pan/Mult
+	// values and the first vertex's raw computed s/t for the first several world surfaces to
+	// stderr, flagging NaN/Infinity explicitly. SE_DEBUG_SHOW_BASETEX has now been proven black
+	// on two completely unrelated renderer backends (Zink/NVK hardware and llvmpipe software),
+	// ruling out any GPU driver as the cause - the bug has to be in our own computed data.
+	// SE_DEBUG_WRAP_TEXCOORD's floor()-based wrap didn't help either, which is consistent with
+	// (not just coincidence): floor(NaN)=NaN and floor(Inf)=Inf, so a NaN/Infinity texcoord would
+	// survive that "wrap" unchanged - if UMult/VMult end up Inf/NaN (e.g. from a zero UScale or
+	// USize feeding UMult = 1.0f/(uscale*USize)), sampling with a NaN/Inf coordinate is undefined
+	// behavior and reads back as black on most implementations. This test looks at the actual
+	// numbers directly instead of inferring from another visual result.
+	static const bool debugPrintTexCoord = std::getenv("SE_DEBUG_PRINT_TEXCOORD") != nullptr;
+	static int debugPrintTexCoordCount = 0;
+	if (debugPrintTexCoord && debugPrintTexCoordCount < 20)
+	{
+		debugPrintTexCoordCount++;
+		bool bad = !std::isfinite(UMult) || !std::isfinite(VMult) || !std::isfinite(UPan) || !std::isfinite(VPan);
+		fprintf(stderr, "[TexCoord] UPan=%f VPan=%f UMult=%f VMult=%f UScale=%f VScale=%f%s\n",
+			UPan, VPan, UMult, VMult, info.tex->UScale, info.tex->VScale,
+			bad ? "  <-- NON-FINITE" : "");
+		if (info.facet->VertexCount > 0)
+		{
+			vec3 p0 = info.facet->Vertices[0];
+			float u0 = dot(xaxis, p0);
+			float v0 = dot(yaxis, p0);
+			float s0 = (u0 - UPan) * UMult;
+			float t0 = (v0 - VPan) * VMult;
+			fprintf(stderr, "[TexCoord]   vertex0 u=%f v=%f -> s=%f t=%f%s\n",
+				u0, v0, s0, t0, (!std::isfinite(s0) || !std::isfinite(t0)) ? "  <-- NON-FINITE" : "");
+		}
+	}
+
 	vec4 color = info.editorcolor ? *info.editorcolor : vec4(1.0f);
+	color *= info.texcolor;
 
 	auto pts = info.facet->Vertices;
 	uint32_t vcount = info.facet->VertexCount;
@@ -1440,8 +1655,15 @@ void GLRenderDevice::DrawComplexSurfaceFaces(const ComplexSurfaceInfo& info)
 			vptr->Position.x = point.x;
 			vptr->Position.y = point.y;
 			vptr->Position.z = point.z;
-			vptr->TexCoord.s = (u - UPan) * UMult;
-			vptr->TexCoord.t = (v - VPan) * VMult;
+			float texS = (u - UPan) * UMult;
+			float texT = (v - VPan) * VMult;
+			if (debugWrapTexCoord)
+			{
+				texS -= std::floor(texS);
+				texT -= std::floor(texT);
+			}
+			vptr->TexCoord.s = texS;
+			vptr->TexCoord.t = texT;
 			vptr->TexCoord2.s = (u - LMUPan) * LMUMult;
 			vptr->TexCoord2.t = (v - LMVPan) * LMVMult;
 			vptr->TexCoord3.s = (u - MacroUPan) * MacroUMult;
@@ -1470,6 +1692,70 @@ void GLRenderDevice::DrawGouraudPolygon(SceneNode* Frame, TextureInfo& Info, con
 	PolyFlags = ApplyPrecedenceRules(PolyFlags);
 
 	GLCachedTexture* tex = Textures->GetTexture(&Info, !!(PolyFlags & PF_Masked));
+
+	// Diagnostic escape hatch: set SE_DEBUG_READBACK_MESHTEX=1 for the same GPU-readback check
+	// as SE_DEBUG_READBACK_WORLDTEX, but for real Gouraud/mesh textures instead of world
+	// surfaces. A bot rendered as a flat black silhouette (zero shading variation, same visual
+	// signature as the black world surfaces) suggests this isn't strictly a world-vs-mesh split
+	// after all - some specific mesh textures may fail the exact same way. Capture several
+	// distinct, reasonably sized ones (not tiny HUD icons) and compare each against its own
+	// CPU-side source data, the same way SE_DEBUG_READBACK_WORLDTEX does.
+	static const bool debugReadbackMeshTex = std::getenv("SE_DEBUG_READBACK_MESHTEX") != nullptr;
+	static std::vector<GLuint> debugReadbackMeshTexSeen;
+	if (debugReadbackMeshTex && debugReadbackMeshTexSeen.size() < 8 && tex != nulltex && tex->Texture)
+	{
+		GLuint handle = tex->Texture->Handle;
+		bool alreadySeen = std::find(debugReadbackMeshTexSeen.begin(), debugReadbackMeshTexSeen.end(), handle) != debugReadbackMeshTexSeen.end();
+		GLint w = 0, h = 0;
+		glBindTexture(GL_TEXTURE_2D, handle);
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h);
+		if (!alreadySeen && w >= 64 && h >= 64)
+		{
+			debugReadbackMeshTexSeen.push_back(handle);
+			std::vector<uint8_t> pixels(static_cast<size_t>(w) * h * 4);
+			glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+			GLenum err = glGetError();
+			size_t center = ((pixels.size() / 2) / 4) * 4;
+			int nonblack = 0;
+			uint64_t sumR = 0, sumG = 0, sumB = 0;
+			for (size_t i = 0; i < pixels.size(); i += 4)
+			{
+				if (pixels[i] || pixels[i + 1] || pixels[i + 2])
+					nonblack++;
+				sumR += pixels[i];
+				sumG += pixels[i + 1];
+				sumB += pixels[i + 2];
+			}
+			uint32_t texelCount = static_cast<uint32_t>(w) * h;
+			fprintf(stderr, "[Readback] Mesh tex handle=%u %dx%d glGetTexImage err=0x%04x\n",
+				handle, w, h, err);
+			fprintf(stderr, "[Readback] %d/%u texels non-black. Avg=(%u,%u,%u) First=(%u,%u,%u,%u) Center=(%u,%u,%u,%u)\n",
+				nonblack, texelCount,
+				(unsigned)(sumR / texelCount), (unsigned)(sumG / texelCount), (unsigned)(sumB / texelCount),
+				pixels[0], pixels[1], pixels[2], pixels[3],
+				pixels[center], pixels[center + 1], pixels[center + 2], pixels[center + 3]);
+
+			if (Info.Format == TextureFormat::P8 && Info.Palette && Info.NumMips > 0 && Info.Mips && !Info.Mips[0].Data.empty())
+			{
+				const UnrealMipmap& mip = Info.Mips[0];
+				const TextureColor* palette = Info.Palette;
+				uint64_t cpuSumR = 0, cpuSumG = 0, cpuSumB = 0;
+				size_t texelN = (size_t)mip.Width * mip.Height;
+				for (size_t i = 0; i < texelN && i < mip.Data.size(); i++)
+				{
+					const TextureColor& c = palette[mip.Data[i]];
+					cpuSumR += c.R;
+					cpuSumG += c.G;
+					cpuSumB += c.B;
+				}
+				fprintf(stderr, "[Readback] CPU source (P8+palette) for same texture: %dx%d Avg=(%u,%u,%u)\n",
+					mip.Width, mip.Height,
+					(unsigned)(cpuSumR / texelN), (unsigned)(cpuSumG / texelN), (unsigned)(cpuSumB / texelN));
+			}
+		}
+		glBindTexture(GL_TEXTURE_2D, 0);
+	}
 
 	SetPipeline(PolyFlags);
 	SetDescriptorSet(PolyFlags, tex);

@@ -51,21 +51,29 @@ IniFile::IniFile(const std::string& filename)
 
 				if (!name.empty())
 				{
+					// Bug: this was disabled ("This doesn't work"), so every "Key[N]=value" line
+					// from a real ini file was stored as a whole separate key literally named
+					// "Key[N]" (single value, unindexed) instead of index N of a shared bare "Key".
+					// GetValue(s)("Key", ..., index) - and every fixed-size array config property
+					// that reads through it - could then never find data that only exists on disk
+					// in this indexed format, even though UpdateFile()'s merge-writer below already
+					// re-derives the same bracket/index split correctly on its own for the opposite
+					// (write) direction. A property populated purely in-memory at runtime (e.g. via
+					// SetValues()) was unaffected, which is why ListFactories worked while
+					// ServerListNames - which only ever exists as stock ini data - did not.
 					int index = -1;
 					bool indexed = false;
-					/* This doesn't work
 					size_t bracket = name.find('[');
 					if (bracket != std::string::npos)
 					{
 						size_t rightBracket = name.find(']');
-						if (rightBracket == std::string::npos)
-							Exception::Throw("malformed INI array index");
-
-						indexed = true;
-						index = Convert::to_int32(name.substr(bracket + 1, rightBracket - bracket - 1));
-						name = name.substr(0, bracket);
+						if (rightBracket != std::string::npos && rightBracket > bracket)
+						{
+							indexed = true;
+							index = Convert::to_int32(name.substr(bracket + 1, rightBracket - bracket - 1));
+							name = name.substr(0, bracket);
+						}
 					}
-					*/
 
 					IniSection& section = AddUniqueSection(sectionName);
 					section.SetValue(name, value, index, indexed);
@@ -144,20 +152,20 @@ Array<std::string> IniFile::GetValues(const NameString& sectionName, const NameS
 	return section->GetValues(keyName, defaultValues);
 }
 
-void IniFile::SetValue(const NameString& sectionName, const NameString& keyName, const std::string& newValue, const int index)
+void IniFile::SetValue(const NameString& sectionName, const NameString& keyName, const std::string& newValue, const int index, const bool indexed)
 {
 	IniSection& section = AddUniqueSection(sectionName.ToString());
-	if (section.SetValue(keyName, newValue, index))
+	if (section.SetValue(keyName, newValue, index, indexed))
 	{
 		isModified = true;
 		hasNewKeys = hasNewKeys || section.HasNewKey();
 	}
 }
 
-void IniFile::SetValues(const NameString& sectionName, const NameString& keyName, const Array<std::string>& newValues)
+void IniFile::SetValues(const NameString& sectionName, const NameString& keyName, const Array<std::string>& newValues, const bool indexed)
 {
 	IniSection& section = AddUniqueSection(sectionName.ToString());
-	if (section.SetValues(keyName, newValues))
+	if (section.SetValues(keyName, newValues, indexed))
 	{
 		isModified = true;
 		hasNewKeys = hasNewKeys || section.HasNewKey();
@@ -236,7 +244,6 @@ void IniFile::UpdateFile(const std::string& filename)
 
 	Array<KeyOccurance> keyOccurrances;
 
-	bool key_has_brackets = false;
 	std::string ini_value;			// Value read from the ini file
 
 	for (auto line_it = lines.begin() ; line_it != lines.end() ; line_it++)
@@ -307,10 +314,21 @@ void IniFile::UpdateFile(const std::string& filename)
 					   right_bracket_pos = key.find(']');
 
 				int bracket_index = 0;
+				// Bug: key_has_brackets used to be declared once outside this loop and only ever
+				// set to true, never reset - so once any bracketed key appeared anywhere earlier
+				// in the file (extremely common: ServerListNames[0], IPPolicies[0], HiddenTypes[0]
+				// etc. all appear early), every later bare key for the rest of the WHOLE file
+				// (including completely unrelated sections like [Engine.Input]'s keybindings) took
+				// the indexed-lookup branch below instead of the correct plain-key one. Scoping it
+				// per-line, like bracket_index already correctly is, fixes that.
+				bool key_has_brackets = false;
 
 				if (left_bracket_pos != std::string::npos && right_bracket_pos != std::string::npos && left_bracket_pos < right_bracket_pos)
 				{
-					bracket_index = Convert::to_int32(key.substr(left_bracket_pos, right_bracket_pos - left_bracket_pos + 1));
+					// Bug: this used to include both brackets themselves in the substring handed
+					// to Convert::to_int32 (e.g. "[0]" instead of "0"), which std::stoi rejects as
+					// invalid, throwing every time this branch ran.
+					bracket_index = Convert::to_int32(key.substr(left_bracket_pos + 1, right_bracket_pos - left_bracket_pos - 1));
 					key_without_brackets = key.substr(0, left_bracket_pos);
 					key_has_brackets = true;
 				}

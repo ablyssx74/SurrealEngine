@@ -30,4 +30,9 @@ public:
 	TypedScriptArray<void*> SendFIFO() { return DynamicArray<void*>(PropOffsets_TcpLink.SendFIFO); }
 
 	socket_t handle = invalid_socket_value;
+
+private:
+	void DispatchReceived();
+
+	std::string ReceiveBuffer;
 };

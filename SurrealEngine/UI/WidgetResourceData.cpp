@@ -97,6 +97,17 @@ static std::unique_ptr<DisplayBackend> backend;
 void InitWidgetResources(const std::string& theme)
 {
 	backend = DisplayBackend::TryCreateBackend();
+	if (!backend)
+	{
+		// If every candidate backend (platform-native, SDL3, SDL2, X11, Wayland) fails to
+		// construct, DisplayBackend::Get() keeps returning null forever after this - previously
+		// that meant a clean run right up until the first GetScreenSize()/etc. call, which
+		// crashed with a bare null-pointer segfault instead of saying what actually went wrong
+		// (e.g. testing with SDL3 disabled at configure time on a system where SDL2 isn't
+		// actually installed either, so nothing at all could be created).
+		Exception::Throw("No display backend could be created. Check that SDL3, SDL2, X11 or "
+			"Wayland (whichever this build was configured to use) is actually installed.");
+	}
 	DisplayBackend::Set(std::move(backend));
 
 	ResourceLoader::Set(std::make_unique<ResourceLoaderPK3>());

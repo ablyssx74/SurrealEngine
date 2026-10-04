@@ -1,6 +1,7 @@
 #pragma once
 
 #include "UInternetLink.h"
+#include <deque>
 
 class UUdpLink : public UInternetLink
 {
@@ -21,4 +22,13 @@ public:
 	int& BroadcastAddr() { return Value<int>(PropOffsets_UdpLink.BroadcastAddr); }
 
 	socket_t handle = invalid_socket_value;
+
+private:
+	struct PendingDatagram
+	{
+		IpAddr From;
+		std::string Data;
+	};
+
+	std::deque<PendingDatagram> ReceiveQueue;
 };

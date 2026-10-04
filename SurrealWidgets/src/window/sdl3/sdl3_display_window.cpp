@@ -5,6 +5,8 @@
 #include <SDL3/SDL_video.h>
 #include <SDL3/SDL_mouse.h>
 #include <cmath>
+#include <cstdlib>
+#include <cstdio>
 
 #include "surrealwidgets/core/image.h"
 
@@ -144,6 +146,14 @@ void SDL3DisplayWindow::SetClientFrame(const Rect& box)
 void SDL3DisplayWindow::Show()
 {
 	SDL_ShowWindow(Handle.window);
+	// SDL_ShowWindow() can return before the window manager has actually finished mapping the
+	// window (on Haiku this is a real round-trip to the app_server, since its windowing is
+	// client-server). Widget::Show() paints and presents a frame right after this call returns,
+	// and if that races ahead of the window actually being on screen, the presented frame is
+	// silently lost - the window then sits blank until some later, real event (a mouse move, a
+	// resize) triggers another paint after the window has caught up. Block here until the show
+	// is actually finalized so the paint that follows lands on a window that's really visible.
+	SDL_SyncWindow(Handle.window);
 }
 
 void SDL3DisplayWindow::ShowFullscreen()
@@ -151,12 +161,14 @@ void SDL3DisplayWindow::ShowFullscreen()
 	SDL_ShowWindow(Handle.window);
 	SDL_SetWindowFullscreen(Handle.window, true);
 	isFullscreen = true;
+	SDL_SyncWindow(Handle.window);
 }
 
 void SDL3DisplayWindow::ShowMaximized()
 {
 	SDL_ShowWindow(Handle.window);
 	SDL_MaximizeWindow(Handle.window);
+	SDL_SyncWindow(Handle.window);
 }
 
 void SDL3DisplayWindow::ShowMinimized()
@@ -170,6 +182,7 @@ void SDL3DisplayWindow::ShowNormal()
 	SDL_ShowWindow(Handle.window);
 	SDL_SetWindowFullscreen(Handle.window, false);
 	isFullscreen = false;
+	SDL_SyncWindow(Handle.window);
 }
 
 void SDL3DisplayWindow::SetWindowResizable(bool enable)
@@ -593,12 +606,18 @@ void SDL3DisplayWindow::OnJoyButtonDown(const SDL_GamepadButtonEvent& event)
 
 void SDL3DisplayWindow::OnKeyUp(const SDL_KeyboardEvent& event)
 {
-	WindowHost->OnWindowKeyUp(ScancodeToInputKey(event.scancode));
+	InputKey key = ScancodeToInputKey(event.scancode);
+	if (std::getenv("SE_DEBUG_INPUT"))
+		fprintf(stderr, "[Input] SDL3 OnKeyUp: scancode=%d (%s) -> InputKey=%d\n", (int)event.scancode, SDL_GetScancodeName(event.scancode), (int)key);
+	WindowHost->OnWindowKeyUp(key);
 }
 
 void SDL3DisplayWindow::OnKeyDown(const SDL_KeyboardEvent& event)
 {
-	WindowHost->OnWindowKeyDown(ScancodeToInputKey(event.scancode));
+	InputKey key = ScancodeToInputKey(event.scancode);
+	if (std::getenv("SE_DEBUG_INPUT"))
+		fprintf(stderr, "[Input] SDL3 OnKeyDown: scancode=%d (%s) -> InputKey=%d\n", (int)event.scancode, SDL_GetScancodeName(event.scancode), (int)key);
+	WindowHost->OnWindowKeyDown(key);
 }
 
 InputKey SDL3DisplayWindow::GetMouseButtonKey(const SDL_MouseButtonEvent& event)

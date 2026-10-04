@@ -4,6 +4,8 @@
 #include "Packages/Engine/Resources/Textures/UTexture.h"
 #include "RenderDevice/RenderDevice.h"
 #include <map>
+#include <cstdio>
+#include <cstdlib>
 
 #ifdef USE_SSE2
 #include <immintrin.h>
@@ -39,6 +41,24 @@ int GLTextureUploader_P8::GetUploadSize(int x, int y, int w, int h)
 
 void GLTextureUploader_P8::UploadRect(void* d, UnrealMipmap* mip, int x, int y, int w, int h, TextureColor* palette, bool masked)
 {
+	// Diagnostic: set SE_DEBUG_DUMP_P8=1 to dump the first few P8->RGBA conversions this
+	// process does (palette pointer, a palette entry, and the resulting converted pixel), to
+	// see whether the CPU-side conversion already produces bad data (an engine bug, same on
+	// every platform) or looks correct here and only goes wrong once the GPU samples it
+	// (pointing at upload/binding instead).
+	static const bool debugDumpP8 = std::getenv("SE_DEBUG_DUMP_P8") != nullptr;
+	static int debugDumpCount = 0;
+	if (debugDumpP8 && debugDumpCount < 200 && !mip->Data.empty())
+	{
+		debugDumpCount++;
+		uint8_t firstIdx = mip->Data[x + y * mip->Width];
+		TextureColor pal0 = palette ? palette[0] : TextureColor(0, 0, 0, 0);
+		TextureColor palIdx = palette ? palette[firstIdx] : TextureColor(0, 0, 0, 0);
+		fprintf(stderr, "[P8 upload #%d] %dx%d masked=%d palette=%p firstIndex=%u palette[0]=(%u,%u,%u,%u) palette[firstIndex]=(%u,%u,%u,%u)\n",
+			debugDumpCount, w, h, masked ? 1 : 0, (void*)palette, firstIdx,
+			pal0.R, pal0.G, pal0.B, pal0.A, palIdx.R, palIdx.G, palIdx.B, palIdx.A);
+	}
+
 	int pitch = mip->Width;
 	uint8_t* src = mip->Data.data() + x + y * pitch;
 	TextureColor* Ptr = (TextureColor*)d;

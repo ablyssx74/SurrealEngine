@@ -96,6 +96,15 @@ UObject* Package::NewObject(const NameString& objname, UClass* objclass, ObjectF
 				obj->SetObject("Class", obj->Class);
 				obj->SetName("Name", obj->Name);
 				obj->SetInt("ObjectFlags", (int)obj->Flags);
+
+				// PerObjectConfig classes (e.g. UBrowserAll/UBrowserUT/UBrowserLAN) need their
+				// config properties loaded from their own per-instance ini section right after
+				// construction - nothing else in the engine ever did this for runtime-constructed
+				// objects (only class default objects got LoadProperties() called on them, in
+				// UClass::Load()), so a freshly `new`'d PerObjectConfig object previously always
+				// kept its class defaults (e.g. an empty ListFactories) no matter what the ini said.
+				if (objclass->ClsFlags & ClassFlags::PerObjectConfig)
+					objclass->LoadProperties(&obj->PropertyData, obj);
 			}
 			return obj;
 		}
@@ -331,6 +340,7 @@ void Package::ReadTables()
 	uint32_t nameOffset = stream->ReadInt32();
 
 	uint32_t exportCount = stream->ReadInt32();
+	FileExportCount = exportCount;
 	uint32_t exportOffset = stream->ReadInt32();
 
 	uint32_t importCount = stream->ReadInt32();
@@ -345,10 +355,13 @@ void Package::ReadTables()
 	{
 		stream->ReadBytes(Guid, 16);
 		uint32_t generationCount = stream->ReadInt32();
+		Generations.reserve(generationCount);
 		for (uint32_t i = 0; i < generationCount; i++)
 		{
-			uint32_t genExportCount = stream->ReadInt32();
-			uint32_t genNameCount = stream->ReadInt32();
+			PackageGeneration generation;
+			generation.ExportCount = stream->ReadInt32();
+			generation.NameCount = stream->ReadInt32();
+			Generations.push_back(generation);
 		}
 	}
 

@@ -53,8 +53,13 @@ public:
 
 	void SaveConfig() override;
 
-	void LoadProperties(PropertyDataBlock* propertyBlock);
-	void SaveProperties(PropertyDataBlock* propertyBlock);
+	// instance is the UObject the properties are being loaded/saved for. It's only needed for
+	// PerObjectConfig classes (e.g. UBrowserAll, a runtime instance rather than a class default
+	// object), where the ini section is the object's own bare Name instead of Package.ClassName -
+	// see UClass.cpp for the full explanation. Left null, the section is always Package.ClassName,
+	// which is correct for ordinary Config classes and for loading/saving class defaults.
+	void LoadProperties(PropertyDataBlock* propertyBlock, UObject* instance = nullptr);
+	void SaveProperties(PropertyDataBlock* propertyBlock, UObject* instance = nullptr);
 
 	uint32_t OldClassRecordSize = 0;
 	ClassFlags ClsFlags = {};
