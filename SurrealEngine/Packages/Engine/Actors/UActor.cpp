@@ -150,13 +150,21 @@ bool UActor::Destroy()
 
 	SetOwner(nullptr);
 
+	// A network client writes replicated Owner/Base values straight into the actors, which can leave these lists
+	// holding an actor that no longer points back at us. Drop it ourselves if the call didn't, or this never ends.
 	while (!ChildActors.empty())
 	{
-		ChildActors.back()->SetOwner(nullptr);
+		UActor* child = ChildActors.back();
+		child->SetOwner(nullptr);
+		if (!ChildActors.empty() && ChildActors.back() == child)
+			ChildActors.pop_back();
 	}
 	while (!BasedActors.empty())
 	{
-		BasedActors.back()->SetBase(nullptr, true);
+		UActor* based = BasedActors.back();
+		based->SetBase(nullptr, true);
+		if (!BasedActors.empty() && BasedActors.back() == based)
+			BasedActors.pop_back();
 	}
 
 	if (Index == -1)
@@ -202,7 +210,9 @@ void UActor::Tick(float elapsed)
 		}
 	}
 
-	TickPhysics(elapsed);
+	// See autonomousPhysicsLastTick: the script already runs the physics for a client's own pawn.
+	if (!(Role() == ROLE_AutonomousProxy && autonomousPhysicsLastTick))
+		TickPhysics(elapsed);
 
 	if (TimerRate() > 0.0f) // Role() == ROLE_Authority && RemoteRole() == ROLE_AutonomousProxy
 	{

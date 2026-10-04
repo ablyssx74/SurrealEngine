@@ -39,6 +39,9 @@ void UPlayerPawn::Tick(float elapsed)
 		}
 	}
 
+	autonomousPhysicsLastTick = autonomousPhysicsThisTick;
+	autonomousPhysicsThisTick = false;
+
 	// TODO: is this the correct place to set this?
 	aForward() = 0.0f;
 

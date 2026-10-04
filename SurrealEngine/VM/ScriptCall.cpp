@@ -7,6 +7,7 @@
 #include "Packages/Engine/Resources/Level/ULevel.h"
 #include "Packages/Core/UClass.h"
 #include "Packages/Core/UFunction.h"
+#include "Engine.h"
 #include <unordered_map>
 
 NameString ToNameString(EventName name)
@@ -68,6 +69,17 @@ bool NameStringToEventName(const NameString& name, EventName& eventName)
 	return true;
 }
 
+// On a network client, only functions declared "simulated" run on the replicas of server actors
+// (ROLE_SimulatedProxy, or ROLE_DumbProxy): everything else (a pickup's Touch handing out the item, a projectile exploding...)
+// belongs to the server, which replicates the result. The client's own pawn (ROLE_AutonomousProxy) runs everything.
+static bool SkipOnSimulatedProxy(UObject* context, UFunction* func)
+{
+	UActor* actor = UObject::TryCast<UActor>(context);
+	if (!actor || actor->Role() >= ROLE_AutonomousProxy || actor->Role() == ROLE_None || !engine || !engine->LevelInfo || engine->LevelInfo->NetMode() != 3 /* NM_Client */)
+		return false;
+	return !AllFlags(func->FuncFlags, FunctionFlags::Simulated);
+}
+
 ExpressionValue CallEvent(UObject* Context, EventName eventname, Array<ExpressionValue> args)
 {
 	if (!Context->IsEventEnabled(eventname))
@@ -80,6 +92,8 @@ ExpressionValue CallEvent(UObject* Context, EventName eventname, Array<Expressio
 	}
 
 	UFunction* func = FindEventFunction(Context, ToNameString(eventname));
+	if (func && SkipOnSimulatedProxy(Context, func))
+		return ExpressionValue::NothingValue();
 	if (func)
 		return Frame::Call(func, Context, std::move(args));
 	else
@@ -98,6 +112,8 @@ ExpressionValue CallEvent(UObject* Context, const NameString& name, Array<Expres
 	}
 
 	UFunction* func = FindEventFunction(Context, name);
+	if (func && SkipOnSimulatedProxy(Context, func))
+		return ExpressionValue::NothingValue();
 	if (func)
 		return Frame::Call(func, Context, std::move(args));
 	else

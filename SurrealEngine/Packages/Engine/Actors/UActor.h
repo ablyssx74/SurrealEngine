@@ -584,6 +584,12 @@ public:
 	int LastDrawFrame = -1;
 
 	float SleepTimeLeft = 0.0f;
+
+	// A client's own pawn (ROLE_AutonomousProxy) has its movement simulated by the script calling
+	// AutonomousPhysics once per move, not by the engine's per-frame physics tick; running both moves the
+	// pawn twice as far as the server allows. These track whether the script did that last frame.
+	bool autonomousPhysicsThisTick = false;
+	bool autonomousPhysicsLastTick = false;
 	vec3 gravityVector;
 
 	// Index in level Actors array
