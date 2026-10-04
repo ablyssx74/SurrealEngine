@@ -54,6 +54,23 @@ GCAllocation* GC::AllocMemory(size_t size)
 
 void GC::FreeMemory(GCAllocation* allocation)
 {
+	// Used when an object's constructor threw: the allocation was already linked into the object list (objects
+	// allocated by the constructor itself may sit in front of it), so unlink it before freeing. Leaving a freed
+	// node in the list corrupts it - later walks can loop forever or read freed memory.
+	GCAllocation* prev = nullptr;
+	for (GCAllocation* cur = allocations; cur; prev = cur, cur = cur->allocklistNext)
+	{
+		if (cur == allocation)
+		{
+			if (prev)
+				prev->allocklistNext = cur->allocklistNext;
+			else
+				allocations = cur->allocklistNext;
+			stats.numObjects--;
+			stats.memoryUsage -= allocation->memsize;
+			break;
+		}
+	}
 	free(allocation);
 }
 

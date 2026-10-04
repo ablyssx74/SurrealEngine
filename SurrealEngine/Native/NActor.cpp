@@ -202,6 +202,7 @@ void NActor::AllActors_U227k(UObject* Self, UObject* BaseClass, UObject*& Actor,
 void NActor::AutonomousPhysics(UObject* Self, float DeltaSeconds)
 {
 	UActor* SelfActor = UObject::Cast<UActor>(Self);
+	SelfActor->autonomousPhysicsThisTick = true;
 	SelfActor->TickPhysics(DeltaSeconds);
 }
 

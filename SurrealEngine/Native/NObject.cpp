@@ -98,7 +98,7 @@ void NObject::RegisterFunctions()
 	RegisterVMNativeFunc_3("Object", "GreaterGreater_VectorRotator", &NObject::GreaterGreater_VectorRotator, 276);
 	RegisterVMNativeFunc_3("Object", "Greater_FloatFloat", &NObject::Greater_FloatFloat, 177);
 	RegisterVMNativeFunc_3("Object", "Greater_IntInt", &NObject::Greater_IntInt, 151);
-	RegisterVMNativeFunc_3("Object", "Greater_StrStr", &NObject::Greater_StrStr, 1186);
+	RegisterVMNativeFunc_3("Object", "Greater_StrStr", &NObject::Greater_StrStr, 116);
 	if (engine->LaunchInfo.IsUnreal1_227())
 		RegisterVMNativeFunc_4("Object", "InStr", &NObject::InStr_U227, 126);
 	else

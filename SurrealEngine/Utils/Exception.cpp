@@ -1,5 +1,7 @@
 
 #include "Precomp.h"
+#include <fstream>
+#include "Utils/File.h"
 #include "Utils/Exception.h"
 #include "VM/Frame.h"
 #include <ios>
@@ -223,6 +225,17 @@ void Exception::Throw(const std::string& text)
 	{
 		sstream << std::endl << "Script call stack:" << std::endl << scriptcallstack << std::endl << std::endl << "Native call stack: " << std::endl;
 		CaptureStackFrames(sstream, 4);
+	}
+
+	// The error window's "Copy to clipboard" is not reliable on every platform and long reports get cut off,
+	// so also keep the full text in a file next to the log.
+	try
+	{
+		std::ofstream out((Directory::localAppData() / "SurrealEngine/SE-LastError.txt").string(), std::ios::trunc);
+		out << sstream.str();
+	}
+	catch (...)
+	{
 	}
 
 	throw std::runtime_error(sstream.str());

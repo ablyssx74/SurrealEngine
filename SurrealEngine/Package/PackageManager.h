@@ -173,6 +173,7 @@ private:
 	struct OpenStream
 	{
 		Package* Pkg = nullptr;
+		std::string Path; // the file this stream was opened for - see GetStream()
 		std::shared_ptr<PackageStream> Stream;
 	};
 

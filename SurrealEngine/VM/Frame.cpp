@@ -1,5 +1,6 @@
 
 #include "Precomp.h"
+#include <set>
 #include "Frame.h"
 #include "Bytecode.h"
 #include "ExpressionEvaluator.h"
@@ -8,6 +9,7 @@
 #include "Packages/Core/UFunction.h"
 #include "Packages/Engine/Subsystems/USurrealAudioDevice.h"
 #include "Engine.h"
+#include "Packages/Engine/Actors/UActor.h"
 #include "Package/PackageManager.h"
 #include "Utils/AlignedAlloc.h"
 #include "Commandlet/VM/DisassemblyCommandlet.h"
@@ -215,6 +217,32 @@ ExpressionValue Frame::Call(UFunction* func, UObject* instance, Array<Expression
 		return ExpressionValue::NothingValue();
 	}
 
+	// SE_DEBUG_TRACE_FUNC=Name1,Name2: log every call of the named functions (class, instance, first float/vector argument).
+	static const std::string traceFuncs = std::getenv("SE_DEBUG_TRACE_FUNC") ? std::string(",") + std::getenv("SE_DEBUG_TRACE_FUNC") + "," : std::string();
+	if (!traceFuncs.empty() && traceFuncs.find("," + func->Name.ToString() + ",") != std::string::npos)
+	{
+		std::string a;
+		for (const ExpressionValue& v : args)
+		{
+			if (v.GetType() == ExpressionValueType::ValueFloat) a += " f=" + std::to_string(v.ToFloat());
+			else if (v.GetType() == ExpressionValueType::ValueByte) a += " b=" + std::to_string((int)v.ToByte());
+			else if (v.GetType() == ExpressionValueType::ValueInt) a += " i=" + std::to_string(v.ToInt());
+			else if (v.GetType() == ExpressionValueType::ValueBool) a += v.ToBool() ? " T" : " F";
+		}
+		UActor* traced = UObject::TryCast<UActor>(instance);
+		char where[96] = "";
+		if (traced)
+			snprintf(where, sizeof(where), " loc=(%.0f,%.0f,%.0f)", traced->Location().x, traced->Location().y, traced->Location().z);
+		fprintf(stderr, "[Trace] %s.%s on %s role=%d%s args:%s\n", instance->Class->Name.ToString().c_str(), func->Name.ToString().c_str(), instance->Name.ToString().c_str(), (int)(traced ? traced->Role() : -1), where, a.c_str());
+	}
+
+	// A client->server net function (ServerMove and friends) called on an actor that the server replicates
+	// to us is sent over the network instead of being run here - the server runs it.
+	if (AllFlags(func->FuncFlags, FunctionFlags::Net) && engine && engine->remoteConnection.TrySendRPC(instance, func, args))
+	{
+		return ExpressionValue::NothingValue();
+	}
+
 	// Trailing optional args may be missing. Add nothing values so the args list matches the function signature.
 	int argindex = 0;
 	for (UField* field = func->Children; field != nullptr; field = field->Next)
@@ -242,7 +270,27 @@ ExpressionValue Frame::Call(UFunction* func, UObject* instance, Array<Expression
 
 ExpressionValue Frame::CallScript(UFunction* func, UObject* instance, Array<ExpressionValue> args)
 {
+	// Runaway script recursion would otherwise overflow the native stack and crash with no clue where.
+	if (Callstack.size() > 300)
+		ThrowException("Script call stack overflow (runaway recursion) calling " + func->Name.ToString());
+
 	Frame frame(instance, func);
+
+	// SE_DEBUG_DUMP_FUNC=Class.Func,Class.Func: print the disassembly of the named script functions on their first call.
+	static const std::string dumpFuncs = std::getenv("SE_DEBUG_DUMP_FUNC") ? std::string(",") + std::getenv("SE_DEBUG_DUMP_FUNC") + "," : std::string();
+	if (!dumpFuncs.empty() && func->Code)
+	{
+		static std::set<UStruct*> dumped;
+		std::string fname = frame.GetName();
+		size_t dot = fname.rfind('.');
+		bool wanted = dumpFuncs.find("," + fname + ",") != std::string::npos || (dot != std::string::npos && dumpFuncs.find("," + fname.substr(0, dot) + ".*,") != std::string::npos);
+		if (wanted && dumped.insert(func).second)
+		{
+			fprintf(stderr, "[Dump] %s\n", fname.c_str());
+			for (size_t i = 0; i < func->Code->Statements.size(); i++)
+				fprintf(stderr, "[Dump]   %zu: %s\n", i, GetDisassembly(func->Code->Statements[i]).c_str());
+		}
+	}
 
 	// Store args in function frame local variables
 	int argindex = 0;

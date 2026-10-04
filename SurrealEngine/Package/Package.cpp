@@ -326,7 +326,11 @@ void Package::ReadTables()
 
 	uint32_t signature = stream->ReadInt32();
 	if (signature != 0x9E2A83C1)
-		Exception::Throw("Not an unreal package file: " + Name.ToString());
+	{
+		char sigText[16];
+		snprintf(sigText, sizeof(sigText), "%08X", signature);
+		Exception::Throw("Not an unreal package file: " + Name.ToString() + " (" + FilePath + ", read signature " + sigText + ")");
+	}
 
 	Version = stream->ReadInt16();
 	LicenseeMode = stream->ReadInt16();
@@ -337,6 +341,7 @@ void Package::ReadTables()
 	Flags = (PackageFlags)stream->ReadUInt32();
 
 	uint32_t nameCount = stream->ReadInt32();
+	FileNameCount = nameCount;
 	uint32_t nameOffset = stream->ReadInt32();
 
 	uint32_t exportCount = stream->ReadInt32();

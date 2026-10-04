@@ -14,7 +14,9 @@ bool UActor::HasAnim(const NameString& sequence)
 
 bool UActor::IsAnimating()
 {
-	return AnimRate() != 0.0f;
+	// A tween (AnimFrame < 0, see TickAnimation) still counts as animating while it blends in. Client scripts test
+	// this every move and restart the weapon's tween when it says no, which kept weapons stuck at the blend's start.
+	return AnimRate() != 0.0f || (AnimFrame() < 0.0f && TweenRate() != 0.0f);
 }
 
 bool UActor::IsAnimating_HP(std::optional<NameString> RootBone)

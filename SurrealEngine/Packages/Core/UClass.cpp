@@ -1,5 +1,6 @@
 
 #include "Precomp.h"
+#include <chrono>
 #include "UClass.h"
 #include "UEnum.h"
 #include "Properties/UPointerProperty.h"
@@ -734,6 +735,9 @@ void UClass::SaveProperties(PropertyDataBlock* propertyBlock, UObject* instance)
 		}
 	}
 
+	// Collect the classes first and reload them afterwards: LoadProperties() allocates, and an allocation can run the
+	// garbage collector, which would free the entry the object list walk is standing on (the walk then never ends).
+	Array<UClass*> propagationTargets;
 	for (GCObject* gcObj : GC::GetObjects())
 	{
 		if (UClass* cls = dynamic_cast<UClass*>(gcObj))
@@ -750,11 +754,14 @@ void UClass::SaveProperties(PropertyDataBlock* propertyBlock, UObject* instance)
 					}
 				}
 			}
-			// Reload through cls's own property list (not this->Properties), so the
-			// property offsets match cls's data block. this->Properties can be a
-			// superset of an ancestor/sibling's layout and would overrun its block.
 			if (propagate && cls != this)
-				cls->LoadProperties(&cls->PropertyData);
+				propagationTargets.push_back(cls);
 		}
 	}
+
+	// Reload through cls's own property list (not this->Properties), so the
+	// property offsets match cls's data block. this->Properties can be a
+	// superset of an ancestor/sibling's layout and would overrun its block.
+	for (UClass* cls : propagationTargets)
+		cls->LoadProperties(&cls->PropertyData);
 }
