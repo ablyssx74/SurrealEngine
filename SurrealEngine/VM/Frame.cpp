@@ -1,5 +1,6 @@
 
 #include "Precomp.h"
+#include <set>
 #include "Frame.h"
 #include "Bytecode.h"
 #include "ExpressionEvaluator.h"
@@ -269,7 +270,27 @@ ExpressionValue Frame::Call(UFunction* func, UObject* instance, Array<Expression
 
 ExpressionValue Frame::CallScript(UFunction* func, UObject* instance, Array<ExpressionValue> args)
 {
+	// Runaway script recursion would otherwise overflow the native stack and crash with no clue where.
+	if (Callstack.size() > 300)
+		ThrowException("Script call stack overflow (runaway recursion) calling " + func->Name.ToString());
+
 	Frame frame(instance, func);
+
+	// SE_DEBUG_DUMP_FUNC=Class.Func,Class.Func: print the disassembly of the named script functions on their first call.
+	static const std::string dumpFuncs = std::getenv("SE_DEBUG_DUMP_FUNC") ? std::string(",") + std::getenv("SE_DEBUG_DUMP_FUNC") + "," : std::string();
+	if (!dumpFuncs.empty() && func->Code)
+	{
+		static std::set<UStruct*> dumped;
+		std::string fname = frame.GetName();
+		size_t dot = fname.rfind('.');
+		bool wanted = dumpFuncs.find("," + fname + ",") != std::string::npos || (dot != std::string::npos && dumpFuncs.find("," + fname.substr(0, dot) + ".*,") != std::string::npos);
+		if (wanted && dumped.insert(func).second)
+		{
+			fprintf(stderr, "[Dump] %s\n", fname.c_str());
+			for (size_t i = 0; i < func->Code->Statements.size(); i++)
+				fprintf(stderr, "[Dump]   %zu: %s\n", i, GetDisassembly(func->Code->Statements[i]).c_str());
+		}
+	}
 
 	// Store args in function frame local variables
 	int argindex = 0;

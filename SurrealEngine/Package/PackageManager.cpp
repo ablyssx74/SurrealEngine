@@ -467,7 +467,21 @@ void PackageManager::ScanFolder(const std::string& packagedir, const std::string
 				NameString fileNameString(dir_entry.path().stem().string());
 				auto it = packageFilenames.find(fileNameString);
 				if (it == packageFilenames.end())
+				{
 					packageFilenames[fileNameString] = (packageDirPath / dir_entry.path().filename()).string();
+				}
+				else if (fs::path(it->second).parent_path() == packageDirPath)
+				{
+					// Package names are case-insensitive, but a case-sensitive file system can hold two files that
+					// differ only in case (e.g. the CD's BotPack.u next to the patch's Botpack.u). Which one the
+					// directory listing returns first is arbitrary, and the stale one makes every network object
+					// index wrong, so keep the most recently written file.
+					std::error_code ec;
+					auto existingTime = fs::last_write_time(it->second, ec);
+					auto thisTime = fs::last_write_time(dir_entry.path(), ec);
+					if (!ec && thisTime > existingTime)
+						it->second = (packageDirPath / dir_entry.path().filename()).string();
+				}
 			}
 		}
 	}

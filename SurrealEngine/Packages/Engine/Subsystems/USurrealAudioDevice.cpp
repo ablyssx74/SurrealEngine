@@ -42,7 +42,14 @@ std::string USurrealAudioDevice::GetPropertyAsString(const NameString& propertyN
 	else if (propertyName == "Latency")
 		return IniPropertyConverter<int>::ToString(Latency);
 	else if (propertyName == "OutputRate")
+	{
+		// The 469 audio menu rebuilds its output rate combo from this value and re-reads it whenever the
+		// combo changes, which never terminates unless the driver reports the property as unknown (as the
+		// real OpenAL driver does - the menu then leaves the combo out).
+		if (engine->LaunchInfo.ue1Version >= 469)
+			return "Unrecognized member 'OutputRate' in class 'AudioSubsystem'";
 		return IniPropertyConverter<AudioFrequency>::ToString(OutputRate);
+	}
 	else if (propertyName == "Channels")
 		return IniPropertyConverter<int>::ToString(Channels);
 	else if (propertyName == "MusicVolume")
